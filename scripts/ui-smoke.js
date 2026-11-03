@@ -39,6 +39,21 @@ async function waitForServer(url, child, logs) {
   throw new Error(`Не дождались запуска сервера: ${logs()}`);
 }
 
+async function assertNoHorizontalScroll(page, width) {
+  await page.setViewportSize({ width, height: 900 });
+  const result = await page.evaluate(() => {
+    const selectors = '.table-scroll, .sheet-table, .analysis-table, .expense-chart-scroll, .stat-value';
+    const offenders = [...document.querySelectorAll(selectors)]
+      .filter((element) => element.offsetParent !== null && element.scrollWidth > element.clientWidth + 1)
+      .map((element) => ({ name: element.className, scroll: element.scrollWidth, client: element.clientWidth }));
+    const wide = [...document.querySelectorAll('body *')].filter((element) => element.offsetParent !== null && !element.matches('input, select, canvas'))
+      .map((element) => ({ name: `${element.tagName}.${element.className}`, left: element.getBoundingClientRect().left, right: element.getBoundingClientRect().right }))
+      .filter((element) => element.right > innerWidth + 1 || element.left < -1).slice(0, 10);
+    return { document: document.documentElement.scrollWidth, viewport: innerWidth, offenders, wide };
+  });
+  assert(result.document <= result.viewport && result.offenders.length === 0 && result.wide.length === 0, `Горизонтальная прокрутка при ${width}px: ${JSON.stringify(result)}`);
+}
+
 (async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'analiz-ui-'));
   const port = await freePort();
@@ -97,7 +112,7 @@ async function waitForServer(url, child, logs) {
     await page.locator('#category-rate').fill('20');
     await page.locator('#category-kind').selectOption('fixed');
     await page.locator('#category-form button[type="submit"]').click();
-    const categoryRow = page.locator('#sheet-body tr').filter({ hasText: 'Реклама — тест' });
+    const categoryRow = page.locator('#sheet-expense-rows tr').filter({ hasText: 'Реклама — тест' });
     await categoryRow.waitFor({ state: 'visible' });
     assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '120');
     await categoryRow.locator('[data-expense][data-quarter="1"]').fill('3');
@@ -108,12 +123,41 @@ async function waitForServer(url, child, logs) {
     await categoryRow.locator('[data-expense][data-quarter="2"]').fill('6');
     await page.waitForFunction(() => document.querySelector('[data-metric="net_profit"][data-quarter="1"]').textContent.replace(/\s/g, '') === '37,60');
     const breakEvenRow = page.locator('#analysis-body tr').filter({ hasText: 'Точка безубыточности' });
-    await page.waitForFunction(() => [...document.querySelectorAll('#analysis-body tr')].some((r) => r.textContent.includes('Точка безубыточности') && r.cells[1].textContent.trim() === '6,00'));
+    await page.waitForFunction(() => [...document.querySelectorAll('#analysis-body tr')].some((r) => r.textContent.includes('Точка безубыточности') && r.cells[1].querySelector('.cell-value').textContent.trim() === '6,00'));
     assert.strictEqual((await breakEvenRow.locator('td').nth(1).innerText()).trim(), '6,00');
     assert((await page.locator('#deduction-note').innerText()).includes('H17'));
+    // Пять плашек независимы; сворачивание не исключает черновик из сохранения.
+    const panels = [
+      ['financial', '#sheet-financial-rows'], ['sales', '#sheet-sales-rows'], ['expenses', '#sheet-expense-rows'],
+      ['analysis', '#panel-analysis'], ['chart', '#panel-expense-chart'],
+    ];
+    assert.strictEqual(await page.locator('[data-panel-toggle]').count(), 5);
+    for (const [key, body] of panels) {
+      const button = page.locator(`[data-panel-toggle="${key}"]`);
+      assert.strictEqual(await button.getAttribute('aria-expanded'), 'true');
+      if (key === 'financial') await button.press('Enter'); else await button.click();
+      assert.strictEqual(await button.getAttribute('aria-expanded'), 'false');
+      assert(await page.locator(body).isHidden(), `${key} должен свернуться`);
+    }
+    assert(await page.locator('#category-management').isHidden());
+    assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '120');
+    assert.strictEqual(await categoryRow.locator('[data-expense][data-quarter="2"]').inputValue(), '6');
     await page.locator('#year-form button[type="submit"]').first().click();
-    await page.waitForFunction(() => document.querySelector('#q-status-1').textContent === 'сохранён');
+    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('#q-status-1').textContent === 'сохранён');
     assert.strictEqual(await page.locator('#q-status-2').innerText(), 'сохранён');
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.waitForFunction(() => document.querySelector('#q-status-1').textContent === 'сохранён');
+    for (const [key, body] of panels) {
+      const button = page.locator(`[data-panel-toggle="${key}"]`);
+      assert.strictEqual(await button.getAttribute('aria-expanded'), 'false', 'Состояние плашки сохраняется при перезагрузке');
+      assert(await page.locator(body).isHidden());
+      await button.click();
+      assert.strictEqual(await button.getAttribute('aria-expanded'), 'true');
+      assert(await page.locator(body).isVisible());
+    }
+    assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '120');
+    assert.strictEqual(await categoryRow.locator('[data-expense][data-quarter="2"]').inputValue(), '6');
+    await page.waitForFunction(() => Chart.getChart(document.querySelector('#expense-chart'))?.width > 0);
     assert.strictEqual(await page.locator('canvas').count(), 1, 'На странице должен остаться только график статей затрат');
     assert.strictEqual(await page.locator('#quarter-chart, #break-even-chart, #history-chart, #tax-chart').count(), 0);
     await page.waitForFunction(() => document.querySelector('#expense-chart') && !document.querySelector('#expense-chart').classList.contains('hidden'));
@@ -122,43 +166,86 @@ async function waitForServer(url, child, logs) {
     assert.strictEqual((await choice.innerText()).trim(), 'Реклама — тест', 'Слева только название, без ставки, суммы и процента');
     assert.strictEqual((await page.locator('.expense-choice').filter({ hasText: 'Налог НДС' }).innerText()).trim(), 'Налог НДС');
     assert.strictEqual((await page.locator('.expense-choice').filter({ hasText: 'Налог на прибыль' }).innerText()).trim(), 'Налог на прибыль');
-    const denominator = await page.locator('#expense-denominator').innerText();
-    assert(denominator.includes('1 кв.: 22,40') && denominator.includes('2 кв.: 24,80') && denominator.includes('себестоимость реализации не входит'));
+    const chartNote = await page.locator('#expense-chart-note').innerText();
+    assert(chartNote.includes('себестоимость реализации не входит') && chartNote.includes('без конвертации'));
     const configuration = await page.evaluate(() => {
       const c = Chart.getChart(document.querySelector('#expense-chart'));
       const line = c.data.datasets.find((d) => d.label === 'Реклама — тест');
       return { type: c.config.type, duration: c.options.animation.duration, tick: c.options.scales.y.ticks.font.size,
-        labels: c.data.labels, names: c.data.datasets.map((d) => d.label), values: line.data,
+        unit: c.options.scales.y.title.text, labels: c.data.labels, names: c.data.datasets.map((d) => d.label), values: line.data,
         tooltip: c.options.plugins.tooltip.callbacks.label({ dataset: line, dataIndex: 0, raw: line.data[0] }) };
     });
     assert.strictEqual(configuration.type, 'line');
     assert.strictEqual(configuration.duration, 1000);
     assert.strictEqual(configuration.tick, 15);
+    assert.strictEqual(configuration.unit, 'Сумма, руб.');
     assert.deepStrictEqual(configuration.labels, ['1 кв.', '2 кв.', '3 кв.', '4 кв.']);
     assert.deepStrictEqual(new Set(configuration.names), new Set(['Реклама — тест', 'Налог НДС', 'Налог на прибыль']));
-    assert(Math.abs(configuration.values[0] - 3 / 22.4 * 100) < 1e-9);
-    assert(Math.abs(configuration.values[1] - 6 / 24.8 * 100) < 1e-9);
-    assert.strictEqual(configuration.values[2], null);
-    assert(configuration.tooltip.includes('13,39%') && configuration.tooltip.includes('3,00'), 'В подсказке доля и сумма выбранного квартала');
+    assert.deepStrictEqual(configuration.values, [3, 6, null, null], 'График использует суммы, не проценты');
+    assert(configuration.tooltip.includes('3,00 руб.') && !configuration.tooltip.includes('%') && !configuration.tooltip.includes('ед.'), 'По решению владельца график всегда подписан в рублях');
     await page.locator('[data-expense-choice="vat"]').uncheck();
-    assert.strictEqual(await page.locator('#expense-denominator').innerText(), denominator, 'Скрытие статьи не должно менять знаменатель');
+    assert.strictEqual(await page.locator('#expense-chart-note').innerText(), chartNote);
     const afterHide = await page.evaluate(() => { const c = Chart.getChart(document.querySelector('#expense-chart')); return { count: c.data.datasets.length, values: c.data.datasets.find((d) => d.label === 'Реклама — тест').data }; });
     assert.strictEqual(afterHide.count, 2);
-    assert.deepStrictEqual(afterHide.values, configuration.values, 'Проценты остальных статей не пересчитываются');
+    assert.deepStrictEqual(afterHide.values, configuration.values, 'Выбор других линий не меняет суммы');
     await page.locator('#expense-select-none').click();
     assert(await page.locator('#expense-chart').isHidden());
     await choice.locator('input').check();
     await page.locator('[data-expense-choice="vat"]').check();
     await page.locator('[data-expense-choice="profit_tax"]').check();
     assert.strictEqual(await page.evaluate(() => Chart.getChart(document.querySelector('#expense-chart')).data.datasets.length), 3);
+
+    // Даже большие суммы и длинное название не создают горизонтальных полос.
+    await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('123456789012345678.12345678');
+    await page.waitForFunction(() => document.querySelector('[data-annual="revenue"]').textContent.replace(/\s/g, '').startsWith('123456789012345'));
+    const longNameId = await categoryRow.locator('[data-open-category-menu]').getAttribute('data-open-category-menu');
+    const longName = page.locator(`[data-open-category-menu="${longNameId}"]`).first();
+    await longName.evaluate((element) => { element.dataset.originalText = element.textContent; element.textContent = 'Длинноеназваниестатьизатрат'.repeat(5); });
+    await page.evaluate(() => {
+      for (const [element, text] of [[document.querySelector('#context-org'), 'Длинноеназваниеорганизации'.repeat(5)],
+        [document.querySelector('#currency-label'), 'Валюта: ' + 'В'.repeat(20)],
+        [document.querySelector('#organization-select option:checked'), 'Длинноеназваниеорганизации'.repeat(5)]]) {
+        element.dataset.originalText = element.textContent; element.textContent = text;
+      }
+    });
+    for (const width of [1920, 1360, 1151, 1150, 1024, 900, 768, 600, 390, 320]) await assertNoHorizontalScroll(page, width);
+    await longName.evaluate((element) => { element.textContent = element.dataset.originalText; });
+    await page.evaluate(() => {
+      for (const element of document.querySelectorAll('#context-org, #currency-label, #organization-select option:checked')) element.textContent = element.dataset.originalText;
+    });
+    await page.locator('#add-category').click();
+    await assertNoHorizontalScroll(page, 320);
+    await page.locator('[data-close-dialog="category-dialog"]').first().click();
+    assert(await page.locator('#expense-chart').isVisible(), 'График должен помещаться на мобильном экране');
+    const mobileCell = categoryRow.locator('[data-expense][data-quarter="1"]');
+    assert(await mobileCell.isVisible());
+    assert((await mobileCell.locator('..').innerText()).includes('1 кв.'), 'На узком экране квартал подписан у каждого поля');
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.waitForFunction(() => { const plot = document.querySelector('.expense-chart-scroll'); return plot.scrollWidth <= plot.clientWidth; });
-    assert(await page.locator('#expense-chart').isVisible(), 'График долей должен помещаться на мобильном экране');
-    assert.deepStrictEqual(await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]), [390, 390]);
     await categoryRow.locator('[data-open-category-menu]').click();
     const mobileMenu = await page.locator('#category-actions-menu').boundingBox();
     assert(mobileMenu && mobileMenu.x >= 0 && mobileMenu.x + mobileMenu.width <= 390 && mobileMenu.y >= 0 && mobileMenu.y + mobileMenu.height <= 844, 'Меню должно помещаться в мобильном окне');
     await page.keyboard.press('Escape');
+    await page.setViewportSize({ width: 1360, height: 900 });
+    await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('120');
+    await page.waitForFunction(() => document.querySelector('[data-annual="revenue"]').textContent.replace(/\s/g, '') === '240,00');
+
+    // Проверяем настоящее сенсорное событие без дополнительного browser context.
+    await page.setViewportSize({ width: 390, height: 844 });
+    const touchName = categoryRow.locator('[data-open-category-menu]');
+    await page.mouse.move(0, 0);
+    await page.keyboard.press('Escape');
+    await touchName.scrollIntoViewIfNeeded();
+    await page.locator('#category-actions-menu').waitFor({ state: 'hidden' });
+    const touchBox = await touchName.boundingBox();
+    const cdp = await context.newCDPSession(page);
+    await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: touchBox.x + touchBox.width / 2, y: touchBox.y + touchBox.height / 2 }] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await page.locator('#category-actions-menu').waitFor({ state: 'visible' });
+    assert.strictEqual(await touchName.getAttribute('aria-expanded'), 'true', 'Меню должно открываться касанием названия');
+    await page.keyboard.press('Escape');
+    await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+    await cdp.detach();
     await page.setViewportSize({ width: 1360, height: 900 });
 
     // Два окна не должны молча перезаписывать друг друга.
@@ -241,13 +328,37 @@ async function waitForServer(url, child, logs) {
     const chooseMenu = async (row, action) => { await openMenu(row); await page.locator(`#category-actions-menu ${action}`).click(); };
     assert.strictEqual(await categoryRow.locator('[data-archive], [data-delete-category]').count(), 0);
     const trigger = categoryRow.locator('[data-open-category-menu]');
-    await openMenu(categoryRow);
+    assert.strictEqual((await trigger.innerText()).trim(), 'Реклама — тест', 'Вместо троеточия используется название статьи');
+    const workingInput = categoryRow.locator('[data-expense][data-quarter="1"]');
+    await workingInput.focus();
+    await trigger.hover();
+    assert(await page.locator('#category-actions-menu').isVisible(), 'Меню должно открываться при наведении');
+    assert(await workingInput.evaluate((element) => element === document.activeElement), 'Наведение не должно забирать фокус');
+    await page.evaluate(() => {
+      document.addEventListener('keydown', function observe(event) {
+        if (event.key === 'ArrowDown') { window.__hoverKeyPrevented = event.defaultPrevented; document.removeEventListener('keydown', observe); }
+      });
+    });
+    await page.keyboard.press('ArrowDown');
+    assert.strictEqual(await page.evaluate(() => window.__hoverKeyPrevented), false, 'Меню по наведению не перехватывает клавиши из поля ввода');
     assert.strictEqual(await trigger.getAttribute('aria-expanded'), 'true');
     assert((await page.locator('#category-actions-menu').innerText()).includes('Скрыть в архив'));
     assert((await page.locator('#category-actions-menu').innerText()).includes('Удалить навсегда'));
+    await page.locator('#category-actions-menu').hover();
+    await page.waitForTimeout(500);
+    assert(await page.locator('#category-actions-menu').isVisible(), 'В меню можно перевести указатель');
+    await page.mouse.move(0, 0);
+    await page.locator('#category-actions-menu').waitFor({ state: 'hidden' });
+    await trigger.press('Enter');
+    assert(await page.locator('#category-actions-menu').isVisible());
     await page.keyboard.press('Escape');
     assert(await page.locator('#category-actions-menu').isHidden());
     assert.strictEqual(await trigger.getAttribute('aria-expanded'), 'false');
+    assert(await trigger.evaluate((element) => element === document.activeElement));
+    await trigger.press('Enter');
+    await page.keyboard.press('Tab');
+    assert(await page.locator('#category-actions-menu').isHidden());
+    assert(await categoryRow.locator('[data-rate]').evaluate((element) => element === document.activeElement), 'Tab закрывает меню и переводит фокус к следующему полю');
     await trigger.press('Enter');
     await page.keyboard.press('ArrowDown');
     assert(await page.locator('#category-actions-menu [data-delete-category]').evaluate((el) => el === document.activeElement));
@@ -285,22 +396,49 @@ async function waitForServer(url, child, logs) {
     assert.strictEqual(await page.locator('#archive-count').innerText(), '0');
     assert.strictEqual(await categoryRow.count(), 0);
 
-    // Пропущенный 1-й квартал даёт Excel #ДЕЛ/0!, даже если H15 определён.
+    // Неопределённый НДС больше не скрывает остальные денежные суммы квартала.
     await page.locator('#year-input').fill('2032'); await page.locator('#year-input').press('Tab');
     await page.waitForFunction(() => document.querySelector('#context-year').textContent.includes('2032'));
     await page.locator('[data-fill-quarter="2"]').click();
     await page.locator('[data-input="retail_revenue"][data-quarter="2"]').fill('120');
     await page.locator('[data-input="non_vat_sales"][data-quarter="2"]').fill('12');
     await page.locator('[data-input="input_vat"][data-quarter="2"]').fill('10');
+    const unknownExpense = page.locator('#sheet-expense-rows [data-expense][data-quarter="2"]').first();
+    const expenseId = await unknownExpense.getAttribute('data-expense');
+    await unknownExpense.fill('5');
     await page.waitForFunction(() => document.querySelector('[data-metric="non_vat_deduction"][data-quarter="2"]').textContent === '#ДЕЛ/0!');
     const note = await page.locator('#deduction-note').innerText();
     assert(note.includes('1,00') && note.includes('#ДЕЛ/0!') && note.includes('сумма квартальных вычетов'));
-    assert((await page.locator('#expense-denominator').innerText()).includes('2 кв.: НДС #ДЕЛ/0!'));
-    await page.setViewportSize({ width: 390, height: 844 });
-    const sizes = await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]);
-    assert(sizes[0] <= sizes[1], `Мобильная страница переполнена: ${sizes}`);
+    await page.waitForFunction(() => document.querySelector('#expense-chart-note').textContent.includes('#ДЕЛ/0!'));
+    await page.locator('[data-expense-choice="vat"]').check();
+    const unknown = await page.evaluate((id) => {
+      const c = Chart.getChart(document.querySelector('#expense-chart'));
+      return { category: c.data.datasets.find((d) => d.expenseKey === `category:${id}`).data,
+        vat: c.data.datasets.find((d) => d.expenseKey === 'vat').data };
+    }, expenseId);
+    assert.deepStrictEqual(unknown.category, [null, 5, null, null]);
+    assert.deepStrictEqual(unknown.vat, [null, null, null, null]);
+
+    // Отрицательный общий итог не блокирует график сумм и не меняет знак налогов.
+    await page.locator('#year-input').fill('2033'); await page.locator('#year-input').press('Tab');
+    await page.waitForFunction(() => document.querySelector('#context-year').textContent.includes('2033'));
+    await page.locator('[data-fill-quarter="1"]').click();
+    await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('120');
+    await page.locator('[data-input="input_vat"][data-quarter="1"]').fill('40');
+    await page.locator('[data-input="cost_of_sales"][data-quarter="1"]').fill('50');
+    const negativeExpense = page.locator('#sheet-expense-rows [data-expense][data-quarter="1"]').first();
+    const negativeId = await negativeExpense.getAttribute('data-expense');
+    await negativeExpense.fill('3');
+    await page.waitForFunction(() => document.querySelector('[data-metric="vat_due"][data-quarter="1"]').textContent.replace(/\s/g, '') === '−20,00');
+    await page.waitForFunction((id) => Chart.getChart(document.querySelector('#expense-chart'))?.data.datasets.some((d) => d.expenseKey === `category:${id}` && d.data[0] === 3), negativeId);
+    const negative = await page.evaluate((id) => {
+      const c = Chart.getChart(document.querySelector('#expense-chart'));
+      return { category: c.data.datasets.find((d) => d.expenseKey === `category:${id}`).data[0], vat: c.data.datasets.find((d) => d.expenseKey === 'vat').data[0] };
+    }, negativeId);
+    assert.deepStrictEqual(negative, { category: 3, vat: -20 });
+    await assertNoHorizontalScroll(page, 390);
     assert.deepStrictEqual(errors, [], `Ошибки браузера: ${errors.join('; ')}`);
-    console.log('UI smoke: шрифты −25%, квартальные линии и проценты, выпадающее меню, архив/удаление, XLSX, конкуренция и мобильный экран — OK.');
+    console.log('UI smoke: ширина без горизонтального скролла, пять плашек, суммы в рублях, меню по наведению/клавиатуре/касанию, архив/удаление, XLSX и конкуренция — OK.');
   } finally {
     if (browser) await browser.close();
     if (child.exitCode === null) {

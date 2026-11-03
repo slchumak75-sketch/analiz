@@ -47,7 +47,9 @@ def self_test() -> None:
         from analiz.excel import make_report, parse_report
         report = parse_report(make_report(result))
         assert sorted(report["quarters"]) == [1] and report["metadata"]["year"] == "2026"
-        assert (Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "web" / "index.html").exists()
+        index = (Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "web" / "index.html").read_text(encoding="utf-8")
+        assert all(f'data-panel-toggle="{key}"' in index for key in ("financial", "sales", "expenses", "analysis", "chart"))
+        assert index.count("<canvas ") == 1 and 'id="expense-chart"' in index
         # Проверяем, что упакованный HTTP-сервер отдаёт HTML и health endpoint.
         from urllib.request import urlopen
         with AnalizServer(("127.0.0.1", 0), store) as server:

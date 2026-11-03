@@ -185,13 +185,20 @@ def test_quarterly_structure_distinguishes_undefined_and_nonpositive(tmp_path):
     store.save_period(oid, 2026, 2, amounts(retail_revenue=120), {str(cid): '5'})
     data = store.summary(oid, 2026)['expense_structure']
     assert [q['status'] for q in data['quarters']] == ['no_data', 'vat_undefined', 'no_data', 'no_data']
-    assert next(i for i in data['items'] if i['category_id'] == cid)['quarter_share_percent'][1] is None
-    # При известном отрицательном налоге и отрицательной сумме проценты не выдаются.
+    category = next(i for i in data['items'] if i['category_id'] == cid)
+    vat = next(i for i in data['items'] if i['kind'] == 'vat')
+    assert category['quarter_share_percent'][1] is None
+    assert category['quarter_amounts'] == [None, D('5'), None, None]  # сумму можно показать даже без доли
+    assert vat['quarter_amounts'][1] is None
+    # При известном отрицательном налоге и отрицательной сумме проценты не выдаются,
+    # но график денежных значений по-прежнему использует реальные суммы со знаком.
     store.delete_period(oid, 2026, 2)
     store.save_period(oid, 2026, 1, amounts(retail_revenue=120, input_vat=40, cost_of_sales=50), {str(cid): '3'})
     data = store.summary(oid, 2026)['expense_structure']
     assert data['quarters'][0]['status'] == 'nonpositive_total' and data['quarters'][0]['total'] == D('-7.6')
     assert all(i['quarter_share_percent'][0] is None for i in data['items'])
+    assert next(i for i in data['items'] if i['category_id'] == cid)['quarter_amounts'][0] == D('3')
+    assert next(i for i in data['items'] if i['kind'] == 'vat')['quarter_amounts'][0] == D('-20')
 
 
 def test_quarterly_share_can_be_available_even_when_year_total_is_nonpositive(tmp_path):

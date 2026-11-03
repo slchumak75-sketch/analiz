@@ -8,7 +8,7 @@ const state = {
   saved: null, view: null, dirty: false, saving: false, dialogMode: 'create',
   refreshId: 0, previewId: 0, previewTimer: null, importToken: null, importing: false, addingCategory: false,
   charts: {}, toastTimer: null, showArchive: false, deleteImpact: null, deletingCategory: false, categoryChanging: false,
-  expenseSelection: new Set(), expenseTouched: false, expenseContext: null,
+  expenseSelection: new Set(), expenseTouched: false, expenseContext: null, collapsedPanels: new Set(),
 };
 const reportRows = [
   ['4', 'Налог НДС', 'vat_due', false], ['5', 'Налог на прибыль', 'profit_tax', false],
@@ -78,6 +78,30 @@ function restoreSelection() {
     if (Number.isInteger(saved.year) && saved.year >= 1900 && saved.year <= 9999) state.year = saved.year;
   } catch (_) { /* повреждённые настройки интерфейса */ }
 }
+const PANEL_KEYS = new Set(['financial', 'sales', 'expenses', 'analysis', 'chart']);
+function restorePanels() {
+  try {
+    const stored = JSON.parse(localStorage.getItem('analiz-collapsed-panels') || '[]');
+    if (Array.isArray(stored)) state.collapsedPanels = new Set(stored.filter((key) => PANEL_KEYS.has(key)));
+  } catch (_) { /* повреждённые настройки интерфейса */ }
+}
+function applyPanel(toggle) {
+  const closed = state.collapsedPanels.has(toggle.dataset.panelToggle);
+  toggle.setAttribute('aria-expanded', String(!closed));
+  for (const id of toggle.getAttribute('aria-controls').split(/\s+/)) document.getElementById(id)?.classList.toggle('hidden', closed);
+}
+function togglePanel(toggle) {
+  const key = toggle.dataset.panelToggle;
+  if (!PANEL_KEYS.has(key)) return;
+  closeCategoryMenu();
+  if (state.collapsedPanels.has(key)) state.collapsedPanels.delete(key); else state.collapsedPanels.add(key);
+  applyPanel(toggle);
+  try { localStorage.setItem('analiz-collapsed-panels', JSON.stringify([...state.collapsedPanels])); } catch (_) { /* отключено */ }
+  if (key === 'chart' && !state.collapsedPanels.has(key)) requestAnimationFrame(() => {
+    state.charts['expense-chart']?.resize();
+    if (state.view) updateExpensePlot(state.view);
+  });
+}
 function setDirty(value) {
   state.dirty = value;
   $('#save-status').textContent = value ? 'Есть несохранённые изменения' : 'Все изменения сохранены';
@@ -120,32 +144,37 @@ function rawExpenseValue(summary, draft, quarter, category) {
   if (draft && Object.hasOwn(draft.quarters[String(quarter)].expenses, key)) return draft.quarters[String(quarter)].expenses[key];
   const value = category.quarters[quarter - 1]; return value === null || n(value) === 0 ? '' : value;
 }
+function cellCaption(label) { return `<span class="cell-label">${esc(label)}</span>`; }
+function categoryTrigger(item, archived) {
+  return `<button class="category-name-trigger" type="button" data-open-category-menu="${item.id}" data-archived="${archived}" data-category-name="${esc(item.name)}" aria-haspopup="menu" aria-expanded="false" aria-controls="category-actions-menu" aria-label="${esc(item.name)} — действия со статьёй">${esc(item.name)}</button>`;
+}
 function renderSheet(summary, draft = null) {
   closeCategoryMenu();
-  let html = '';
+  const groups = { financial: '', sales: '', expenses: '' };
   for (const [row, label, key, manual] of reportRows) {
-    if (row === '4') html += '<tr class="group-row"><th colspan="8">ФИНАНСОВЫЙ РЕЗУЛЬТАТ</th></tr>';
-    if (row === '8') html += '<tr class="group-row"><th colspan="8">ПРОДАЖИ, НДС И СЕБЕСТОИМОСТЬ</th></tr>';
-    html += `<tr class="${['4','5','6','7','10','13','19'].includes(row) ? 'row-important' : ''}"><td><div class="label-cell"><span class="row-code">${row}</span><span class="label-name">${esc(label)}</span><span class="row-kind ${manual ? 'manual' : ''}">${manual ? 'ввод' : 'расчёт'}</span></div></td><td class="muted-cell">—</td><td class="muted-cell">—</td>`;
+    let html = `<tr class="${['4','5','6','7','10','13','19'].includes(row) ? 'row-important' : ''}"><td><div class="label-cell"><span class="row-code">${row}</span><span class="label-name">${esc(label)}</span><span class="row-kind ${manual ? 'manual' : ''}">${manual ? 'ввод' : 'расчёт'}</span></div></td><td class="muted-cell na-cell">—</td><td class="muted-cell na-cell">—</td>`;
     for (let q = 1; q <= 4; q++) {
       if (manual) {
         const value = rawInputValue(summary, draft, q, key);
-        html += `<td><input class="sheet-input" data-input="${key}" data-quarter="${q}" inputmode="decimal" autocomplete="off" maxlength="32" value="${esc(value)}" placeholder="—" aria-label="${esc(label)}, ${q} квартал"></td>`;
-      } else html += `<td class="calculated" data-metric="${key}" data-quarter="${q}">—</td>`;
+        html += `<td>${cellCaption(`${q} кв.`)}<input class="sheet-input" data-input="${key}" data-quarter="${q}" inputmode="decimal" autocomplete="off" maxlength="32" value="${esc(value)}" placeholder="—" aria-label="${esc(label)}, ${q} квартал"></td>`;
+      } else html += `<td class="calculated">${cellCaption(`${q} кв.`)}<span class="cell-value" data-metric="${key}" data-quarter="${q}">—</span></td>`;
     }
-    html += `<td class="calculated" data-annual="${key}">—</td></tr>`;
+    html += `<td class="calculated">${cellCaption('Итого за год')}<span class="cell-value" data-annual="${key}">—</span></td></tr>`;
+    groups[Number(row) < 8 ? 'financial' : 'sales'] += html;
   }
-  html += '<tr class="group-row"><th colspan="8">СТАТЬИ ЗАТРАТ БЕЗ НДС · УКАЖИТЕ ТИП ДЛЯ ТОЧКИ БЕЗУБЫТОЧНОСТИ</th></tr>';
   for (const category of summary.expenses.filter((item) => !item.archived)) {
     const id = String(category.id), settings = draft?.settings?.[id] || { vat_rate: category.vat_rate ?? '', cost_type: category.cost_type };
     const source = category.source_row ? String(category.source_row) : '•';
-    html += `<tr><td><div class="label-cell"><span class="row-code">${source}</span><span class="label-name">${esc(category.name)}</span><button class="category-menu-trigger" type="button" data-open-category-menu="${id}" data-archived="false" data-category-name="${esc(category.name)}" aria-haspopup="menu" aria-expanded="false" aria-controls="category-actions-menu" title="Действия со статьёй" aria-label="Действия со статьёй ${esc(category.name)}">⋮</button></div></td>`;
-    html += `<td><input class="sheet-input rate-input" data-rate="${id}" inputmode="decimal" autocomplete="off" maxlength="12" value="${esc(settings.vat_rate ?? '')}" placeholder="—" aria-label="Ставка НДС: ${esc(category.name)}"></td>`;
-    html += `<td><select class="sheet-select" data-kind="${id}" aria-label="Тип затрат: ${esc(category.name)}"><option value="unclassified" ${settings.cost_type === 'unclassified' ? 'selected' : ''}>Не определён</option><option value="fixed" ${settings.cost_type === 'fixed' ? 'selected' : ''}>Постоянные</option><option value="variable" ${settings.cost_type === 'variable' ? 'selected' : ''}>Переменные</option></select></td>`;
-    for (let q = 1; q <= 4; q++) html += `<td><input class="sheet-input" data-expense="${id}" data-quarter="${q}" inputmode="decimal" autocomplete="off" maxlength="32" value="${esc(rawExpenseValue(summary, draft, q, category))}" placeholder="—" aria-label="${esc(category.name)}, ${q} квартал"></td>`;
-    html += `<td class="calculated" data-category-total="${id}">—</td></tr>`;
+    let html = `<tr class="category-row"><td><div class="label-cell"><span class="row-code">${source}</span>${categoryTrigger(category, false)}</div></td>`;
+    html += `<td>${cellCaption('НДС, %')}<input class="sheet-input rate-input" data-rate="${id}" inputmode="decimal" autocomplete="off" maxlength="12" value="${esc(settings.vat_rate ?? '')}" placeholder="—" aria-label="Ставка НДС: ${esc(category.name)}"></td>`;
+    html += `<td>${cellCaption('Тип затрат')}<select class="sheet-select" data-kind="${id}" aria-label="Тип затрат: ${esc(category.name)}"><option value="unclassified" ${settings.cost_type === 'unclassified' ? 'selected' : ''}>Не определён</option><option value="fixed" ${settings.cost_type === 'fixed' ? 'selected' : ''}>Постоянные</option><option value="variable" ${settings.cost_type === 'variable' ? 'selected' : ''}>Переменные</option></select></td>`;
+    for (let q = 1; q <= 4; q++) html += `<td>${cellCaption(`${q} кв.`)}<input class="sheet-input" data-expense="${id}" data-quarter="${q}" inputmode="decimal" autocomplete="off" maxlength="32" value="${esc(rawExpenseValue(summary, draft, q, category))}" placeholder="—" aria-label="${esc(category.name)}, ${q} квартал"></td>`;
+    html += `<td class="calculated">${cellCaption('Итого за год')}<span class="cell-value" data-category-total="${id}">—</span></td></tr>`;
+    groups.expenses += html;
   }
-  $('#sheet-body').innerHTML = html;
+  $('#sheet-financial-rows').innerHTML = groups.financial;
+  $('#sheet-sales-rows').innerHTML = groups.sales;
+  $('#sheet-expense-rows').innerHTML = groups.expenses;
   renderArchive(summary);
 }
 function renderArchive(summary) {
@@ -153,7 +182,7 @@ function renderArchive(summary) {
   $('#archive-count').textContent = archived.length;
   $('#toggle-archive').setAttribute('aria-expanded', String(state.showArchive));
   $('#archive-panel').classList.toggle('hidden', !state.showArchive);
-  $('#archive-list').innerHTML = archived.length ? archived.map((item) => `<div class="archive-item"><div><strong>${esc(item.name)}</strong><span>За ${summary.year} год: ${summary.quarter_count ? esc(money(item.total, true)) : 'нет данных'}</span></div><button class="category-menu-trigger" type="button" data-open-category-menu="${item.id}" data-archived="true" data-category-name="${esc(item.name)}" aria-haspopup="menu" aria-expanded="false" aria-controls="category-actions-menu" title="Действия со статьёй" aria-label="Действия со статьёй ${esc(item.name)}">⋮</button></div>`).join('') : '<p>Скрытых статей пока нет.</p>';
+  $('#archive-list').innerHTML = archived.length ? archived.map((item) => `<div class="archive-item"><div>${categoryTrigger(item, true)}<span>За ${summary.year} год: ${summary.quarter_count ? esc(money(item.total, true)) : 'нет данных'}</span></div></div>`).join('') : '<p>Скрытых статей пока нет.</p>';
 }
 
 function collect() {
@@ -284,12 +313,13 @@ function renderAnalysisTable(s) {
     ['Запас прочности, %', 'analysis', 'safety_percent', true], ['Чистая прибыль', 'metrics', 'net_profit', false],
     ['Чистая рентабельность, %', 'metrics', 'net_margin', true],
   ];
+  const cell = (label, value) => `<td>${cellCaption(label)}<span class="cell-value">${esc(value)}</span></td>`;
   $('#analysis-body').innerHTML = rows.map(([label, group, key, percent]) => {
     const format = (value, exists) => value === null ? (key === 'expense_tax_total' && exists ? '#ДЕЛ/0!' : '—') : `${fixed(value)}${percent ? '%' : ''}`;
-    const cells = s.quarters.map((q) => `<td>${esc(format(analysisValue(group === 'analysis' ? q.analysis : q.metrics, group, key), q.exists))}</td>`).join('');
+    const cells = s.quarters.map((q) => cell(`${q.quarter} кв.`, format(analysisValue(group === 'analysis' ? q.analysis : q.metrics, group, key), q.exists))).join('');
     const total = analysisValue(group === 'analysis' ? s.analysis : (s.quarter_count ? s.annual : null), group, key);
-    return `<tr class="${key === 'break_even_revenue' ? 'analysis-emphasis' : ''}"><td>${esc(label)}</td>${cells}<td>${esc(format(total, s.quarter_count > 0))}</td></tr>`;
-  }).join('') + `<tr><td>Состояние расчёта порога</td>${s.quarters.map((q) => `<td>${esc(q.analysis ? statusLabels[q.analysis.break_even_status] : '—')}</td>`).join('')}<td>${esc(s.analysis ? statusLabels[s.analysis.break_even_status] : '—')}</td></tr>`;
+    return `<tr class="${key === 'break_even_revenue' ? 'analysis-emphasis' : ''}"><td>${esc(label)}</td>${cells}${cell('Итого за год', format(total, s.quarter_count > 0))}</tr>`;
+  }).join('') + `<tr><td>Состояние расчёта порога</td>${s.quarters.map((q) => cell(`${q.quarter} кв.`, q.analysis ? statusLabels[q.analysis.break_even_status] : '—')).join('')}${cell('Итого за год', s.analysis ? statusLabels[s.analysis.break_even_status] : '—')}</tr>`;
 }
 const COLORS = { green: '#176e50', light: '#70a58b', yellow: '#a87808', grid: '#dce7df', red: '#b0443d', blue: '#367c76' };
 function chartOptions() {
@@ -317,25 +347,22 @@ function renderExpenseChart(s) {
     // Прежний выбор по умолчанию: крупнейшие статьи и оба налога; всё можно переключить слева.
     const nonzero = (item) => item.quarter_amounts.some((value) => value !== null && n(value) !== 0);
     const defaults = items.filter((item) => item.kind === 'category' && nonzero(item)).slice(0, 10);
-    defaults.push(...items.filter((item) => item.kind !== 'category' && nonzero(item)));
+    defaults.push(...items.filter((item) => item.kind !== 'category' && item.quarter_amounts.some((value) => value !== null)));
     state.expenseSelection = new Set(defaults.map(expenseKey));
   }
   $('#expense-choices').innerHTML = items.map((item) => {
     const key = expenseKey(item), checked = state.expenseSelection.has(key) ? 'checked' : '';
     return `<label class="expense-choice"><input type="checkbox" data-expense-choice="${esc(key)}" ${checked}><span class="expense-series-dot" aria-hidden="true" style="--series-color:${expenseColor(item)}"></span><span class="expense-choice-name">${esc(item.name)}</span></label>`;
   }).join('');
-  const periods = s.expense_structure.quarters.map((q) => {
-    const detail = q.status === 'ready' ? money(q.total, true) : q.status === 'vat_undefined' ? 'НДС #ДЕЛ/0!' : q.status === 'nonpositive_total' ? 'сумма неположительна' : 'нет данных';
-    return `${q.quarter} кв.: ${detail}`;
-  }).join(' · ');
-  $('#expense-denominator').textContent = `Общая сумма для долей каждого квартала: ${periods}. Знаменатель — все статьи затрат, НДС к уплате и налог на прибыль; себестоимость реализации не входит. Выбор линий не меняет знаменатель. Архивные суммы сохраняются. При неопределённом НДС или неположительной сумме доли недоступны.`;
+  const vatError = s.expense_structure.quarters.some((q) => q.status === 'vat_undefined');
+  $('#expense-chart-note').textContent = 'Показаны суммы статей, НДС к уплате и налога на прибыль; себестоимость реализации не входит. Архивные суммы сохранены. Суммы подписаны «руб.» без конвертации валют.' + (vatError ? ' Для кварталов с #ДЕЛ/0! НДС на графике не отображается; остальные доступные суммы сохранены.' : '');
   updateExpensePlot(s);
 }
 function updateExpensePlot(s) {
   const structure = s.expense_structure;
   const chosen = expenseSorted(s).filter((item) => state.expenseSelection.has(expenseKey(item)));
   const datasets = chosen.map((item) => dataset(item.name, item.quarter_amounts, expenseColor(item), {
-    data: item.quarter_share_percent.map(n), expenseKey: expenseKey(item),
+    expenseKey: expenseKey(item),
     borderWidth: 2.5, pointRadius: 4, pointHoverRadius: 6, tension: .2, fill: false, spanGaps: false,
   }));
   const canPlot = datasets.some((line) => line.data.some((value) => value !== null && Number.isFinite(value)));
@@ -344,8 +371,7 @@ function updateExpensePlot(s) {
     if (state.charts['expense-chart']) { state.charts['expense-chart'].destroy(); delete state.charts['expense-chart']; }
     canvas.classList.add('hidden'); empty.classList.remove('hidden');
     const hasPeriods = structure.quarters.some((quarter) => quarter.status !== 'no_data');
-    const hasReady = structure.quarters.some((quarter) => quarter.status === 'ready');
-    empty.textContent = !hasPeriods ? 'Введите данные, чтобы увидеть график.' : !hasReady ? 'Доли не определены: НДС содержит #ДЕЛ/0! или общая сумма затрат с налогами не положительна.' : !chosen.length ? 'Выберите статью или налог слева.' : 'Для выбранных статей нет доступных значений.';
+    empty.textContent = !hasPeriods ? 'Введите данные, чтобы увидеть график.' : !chosen.length ? 'Выберите статью или налог слева.' : 'Для выбранных статей нет доступных сумм.';
     return;
   }
   if (typeof Chart === 'undefined') { canvas.classList.add('hidden'); empty.classList.remove('hidden'); empty.textContent = 'Не удалось загрузить график.'; return; }
@@ -358,9 +384,9 @@ function updateExpensePlot(s) {
   // Та же длительность и easing, что у анимации линии чистой прибыли Chart.js.
   options.animation = { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1000, easing: 'easeOutQuart' };
   options.interaction = { mode: 'nearest', intersect: true };
-  options.plugins.tooltip.callbacks.label = (ctx) => ` ${ctx.dataset.label}: ${fixed(ctx.raw)}% · ${money(ctx.dataset.original[ctx.dataIndex], true)}`;
+  options.plugins.tooltip.callbacks.label = (ctx) => ` ${ctx.dataset.label}: ${money(ctx.dataset.original[ctx.dataIndex])} руб.`;
   options.scales.y.beginAtZero = true;
-  options.scales.y.ticks.callback = (value) => `${fixed(value, 2, true)}%`;
+  options.scales.y.title = { display: true, text: 'Сумма, руб.', color: '#435f51', font: { size: 15 } };
   state.charts['expense-chart'] = new Chart(canvas, { type: 'line', data: { labels, datasets }, options });
 }
 function renderResults(summary) {
@@ -425,8 +451,9 @@ async function changeCategoryArchive(id, archived) {
     await refresh(); toast(archived ? 'Статья скрыта в архиве; история сохранена.' : 'Статья восстановлена.');
   } finally { state.categoryChanging = false; $('#application').inert = false; }
 }
-let activeCategoryMenuTrigger = null;
+let activeCategoryMenuTrigger = null, categoryMenuCloseTimer = null;
 function closeCategoryMenu(restoreFocus = false) {
+  clearTimeout(categoryMenuCloseTimer);
   const trigger = activeCategoryMenuTrigger;
   if (trigger) trigger.setAttribute('aria-expanded', 'false');
   activeCategoryMenuTrigger = null;
@@ -437,41 +464,70 @@ function positionCategoryMenu() {
   const trigger = activeCategoryMenuTrigger, menu = $('#category-actions-menu');
   if (!trigger?.isConnected) { closeCategoryMenu(); return; }
   const target = trigger.getBoundingClientRect();
-  if (target.bottom < 0 || target.top > innerHeight || target.right < 0 || target.left > innerWidth) { closeCategoryMenu(); return; }
+  if (target.bottom < 0 || target.top > innerHeight || target.right < 0 || target.left > innerWidth || !target.width) { closeCategoryMenu(); return; }
   const rect = menu.getBoundingClientRect();
   const left = Math.max(8, Math.min(target.right - rect.width, innerWidth - rect.width - 8));
   const below = target.bottom + 4;
   const top = below + rect.height <= innerHeight - 8 ? below : Math.max(8, target.top - rect.height - 4);
   menu.style.left = `${left}px`; menu.style.top = `${top}px`;
 }
-function openCategoryMenu(trigger) {
-  if (trigger === activeCategoryMenuTrigger) { closeCategoryMenu(); return; }
-  closeCategoryMenu();
-  const id = Number(trigger.dataset.openCategoryMenu), archived = trigger.dataset.archived === 'true';
+function openCategoryMenu(trigger, focusMenu = false) {
+  clearTimeout(categoryMenuCloseTimer);
   const menu = $('#category-actions-menu');
-  menu.setAttribute('aria-label', `Действия со статьёй ${trigger.dataset.categoryName}`);
-  menu.innerHTML = `<button type="button" role="menuitem" data-archive="${id}" data-next="${archived ? 'false' : 'true'}">${archived ? 'Восстановить' : 'Скрыть в архив'}</button><button type="button" role="menuitem" class="danger-link" data-delete-category="${id}">Удалить навсегда</button>`;
-  menu.style.visibility = 'hidden'; menu.classList.remove('hidden');
-  activeCategoryMenuTrigger = trigger; trigger.setAttribute('aria-expanded', 'true');
-  positionCategoryMenu(); menu.style.visibility = '';
-  menu.querySelector('button')?.focus({ preventScroll: true });
+  if (trigger !== activeCategoryMenuTrigger) {
+    // Наведение не должно отнимать фокус у управления, открытого с клавиатуры.
+    if (!focusMenu && menu.contains(document.activeElement)) return;
+    closeCategoryMenu();
+    const id = Number(trigger.dataset.openCategoryMenu), archived = trigger.dataset.archived === 'true';
+    menu.setAttribute('aria-label', `Действия со статьёй ${trigger.dataset.categoryName}`);
+    menu.innerHTML = `<button type="button" role="menuitem" data-archive="${id}" data-next="${archived ? 'false' : 'true'}">${archived ? 'Восстановить' : 'Скрыть в архив'}</button><button type="button" role="menuitem" class="danger-link" data-delete-category="${id}">Удалить навсегда</button>`;
+    menu.style.visibility = 'hidden'; menu.classList.remove('hidden');
+    activeCategoryMenuTrigger = trigger; trigger.setAttribute('aria-expanded', 'true');
+    positionCategoryMenu(); menu.style.visibility = '';
+  }
+  if (focusMenu) menu.querySelector('button')?.focus({ preventScroll: true });
 }
+function scheduleCategoryMenuClose() {
+  clearTimeout(categoryMenuCloseTimer);
+  categoryMenuCloseTimer = setTimeout(() => {
+    const trigger = activeCategoryMenuTrigger, menu = $('#category-actions-menu');
+    if (!trigger || trigger.matches(':hover') || menu.matches(':hover') || trigger === document.activeElement || menu.contains(document.activeElement)) return;
+    closeCategoryMenu();
+  }, 450);
+}
+document.addEventListener('pointerover', (event) => {
+  if (event.pointerType === 'touch') return;
+  const trigger = event.target.closest('[data-open-category-menu]');
+  if (trigger) openCategoryMenu(trigger);
+  else if (event.target.closest('#category-actions-menu')) clearTimeout(categoryMenuCloseTimer);
+});
+document.addEventListener('pointerout', (event) => {
+  if (event.pointerType === 'touch' || !activeCategoryMenuTrigger) return;
+  const menu = $('#category-actions-menu'), target = event.target;
+  if (!target.closest('[data-open-category-menu]') && !target.closest('#category-actions-menu')) return;
+  const next = event.relatedTarget;
+  if (next instanceof Node && (activeCategoryMenuTrigger.contains(next) || menu.contains(next))) return;
+  scheduleCategoryMenuClose();
+});
 window.addEventListener('scroll', () => { if (activeCategoryMenuTrigger) positionCategoryMenu(); }, true);
 window.addEventListener('resize', () => { if (activeCategoryMenuTrigger) positionCategoryMenu(); });
 document.addEventListener('keydown', (event) => {
   if (!activeCategoryMenuTrigger) return;
-  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeCategoryMenu(true); return; }
-  if (event.key === 'Tab') { setTimeout(() => closeCategoryMenu(), 0); return; }
-  if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+  const menu = $('#category-actions-menu'), focusInMenu = menu.contains(document.activeElement);
+  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeCategoryMenu(focusInMenu || activeCategoryMenuTrigger === document.activeElement); return; }
+  if (event.key === 'Tab') { closeCategoryMenu(focusInMenu); return; }
+  if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) && (focusInMenu || activeCategoryMenuTrigger === document.activeElement)) {
     event.preventDefault();
-    const buttons = [...$('#category-actions-menu').querySelectorAll('button')], current = buttons.indexOf(document.activeElement);
-    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+    const buttons = [...menu.querySelectorAll('button')], current = buttons.indexOf(document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : current < 0 ? (event.key === 'ArrowUp' ? buttons.length - 1 : 0) : (current + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
     buttons[next]?.focus({ preventScroll: true });
   }
 });
 document.addEventListener('click', (event) => {
+  const panel = event.target.closest('[data-panel-toggle]');
+  if (panel) { togglePanel(panel); return; }
   const menuTrigger = event.target.closest('[data-open-category-menu]');
-  if (menuTrigger) { openCategoryMenu(menuTrigger); return; }
+  if (menuTrigger) { openCategoryMenu(menuTrigger, true); return; }
   if (!event.target.closest('#category-actions-menu')) closeCategoryMenu();
   const close = event.target.closest('[data-close-dialog]'); if (close) { $(`#${close.dataset.closeDialog}`).close(); return; }
   const fill = event.target.closest('[data-fill-quarter]');
@@ -612,4 +668,4 @@ $('#shutdown').addEventListener('click', async () => {
   try { await api('/api/shutdown', { method: 'POST', body: {} }); state.dirty = false; document.body.innerHTML = '<div class="onboarding"><div class="eyebrow centered">РАБОТА ЗАВЕРШЕНА</div><h1>Приложение закрыто</h1><p>Ваши данные сохранены на компьютере. Эту вкладку можно закрыть.</p></div>'; } catch (error) { fail(error); }
 });
 window.addEventListener('beforeunload', (event) => { if (state.dirty) { event.preventDefault(); event.returnValue = ''; } });
-(async () => { restoreSelection(); await refreshOrganizations(); await refresh(); })().catch((error) => { $('#fatal-error').textContent = `Не удалось открыть приложение: ${error.message}`; $('#fatal-error').classList.remove('hidden'); fail(error); });
+(async () => { restoreSelection(); restorePanels(); $$('[data-panel-toggle]').forEach(applyPanel); await refreshOrganizations(); await refresh(); })().catch((error) => { $('#fatal-error').textContent = `Не удалось открыть приложение: ${error.message}`; $('#fatal-error').classList.remove('hidden'); fail(error); });
