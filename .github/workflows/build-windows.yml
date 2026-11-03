@@ -59,7 +59,7 @@ jobs:
           $process = Start-Process -FilePath $exe -ArgumentList '--self-test' -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Bundled executable self-test failed: $($process.ExitCode)" }
       - name: Upload Windows application
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: AnalizOrganizaciy-Windows-x64
           path: dist/AnalizOrganizaciy.exe

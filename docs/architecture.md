@@ -50,7 +50,7 @@ python app.py --self-test
 
 Для UI-теста на Linux укажите `CHROME_PATH`, если браузер не найден автоматически. На Windows runner используется установленный Chrome/Edge. Тесты используют временные базы и синтетические числа, но контрактные тесты читают исходный XLSX для сравнения сохранённых результатов всех формул.
 
-Windows-сборка: `python -m PyInstaller --onefile --windowed --name AnalizOrganizaciy --add-data "web;web" app.py`. Workflow запускается на каждом push, проверяет исходник/тесты/UI/EXE и публикует `AnalizOrganizaciy-Windows-x64`. Артефакт GitHub хранится 90 дней и не является релизом. Локальный commit без push не запускает GitHub Actions.
+Windows-сборка: `python -m PyInstaller --onefile --windowed --name AnalizOrganizaciy --add-data "web;web" app.py`. Workflow запускается на каждом push, проверяет исходник/тесты/UI/EXE и публикует `AnalizOrganizaciy-Windows-x64`. Используются закреплённые версии официальных Actions v7 на Node.js 24. Артефакт GitHub хранится 90 дней и не является релизом. Локальный commit без push не запускает GitHub Actions.
 
 ## Что остаётся на будущее
 
