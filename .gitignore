@@ -1,0 +1,15 @@
+# Runtime data and local tooling never belong in the repository.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+build/
+dist/
+*.spec
+node_modules/
+.DS_Store
