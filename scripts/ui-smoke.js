@@ -1,4 +1,4 @@
-/* End-to-end тест на временной БД и системном Chrome/Edge. Исходная книга не импортируется. */
+/* End-to-end тест на временной БД и системном Chrome/Edge, только синтетические значения. */
 'use strict';
 const assert = require('assert');
 const fs = require('fs');
@@ -56,9 +56,14 @@ async function waitForServer(url, child, logs) {
     await waitForServer(url, child, () => serverLogs);
     const args = process.platform === 'linux' ? ['--no-sandbox', '--disable-dev-shm-usage', '--no-zygote', '--single-process'] : [];
     browser = await chromium.launch({ executablePath: findBrowser(), headless: true, args });
-    const page = await browser.newPage({ viewport: { width: 1360, height: 900 } });
+    const context = await browser.newContext({ viewport: { width: 1360, height: 900 }, acceptDownloads: true });
+    const page = await context.newPage();
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
+    if (process.env.DEBUG_UI) {
+      page.on('console', (message) => console.log('BROWSER:', message.type(), message.text()));
+      page.on('response', (response) => { if (response.url().includes('/api/excel/')) console.log('EXCEL:', response.status(), response.url()); });
+    }
     page.on('dialog', (dialog) => dialog.accept());
     await page.goto(url, { waitUntil: 'networkidle' });
     assert(await page.locator('#empty-onboarding').isVisible(), 'Новая база должна быть пустой');
@@ -68,60 +73,119 @@ async function waitForServer(url, child, logs) {
     await page.locator('#org-save').click();
     await page.waitForSelector('#main-content:not(.hidden)');
     assert.strictEqual(await page.locator('#context-org').innerText(), 'Тестовая организация');
+    assert.strictEqual(await page.locator('.navigation').count(), 0, 'Разделы должны быть на одной странице');
+    assert.strictEqual(await page.locator('[data-fill-quarter]').count(), 4);
+    assert((await page.locator('.sheet-table thead').innerText()).includes('Итого за год'));
 
     await page.locator('#year-input').fill('2030');
     await page.locator('#year-input').press('Tab');
     await page.waitForFunction(() => document.querySelector('#context-year').textContent.includes('2030'));
-    await page.locator('.navigation [data-view="entry"]').click();
-    assert(await page.locator('#entry-status').innerText() === 'Не заполнен');
-    await page.locator('#fill-zero').click();
-    await page.locator('#field-retail_revenue').fill('120');
-    await page.locator('#field-input_vat').fill('10');
-    await page.locator('#field-non_vat_deduction').fill('2');
-    await page.locator('#field-cost_of_sales').fill('50');
-    // Добавление статьи не должно терять ещё не сохранённые данные формы.
-    await page.locator('#add-category-entry').click();
+    await page.locator('[data-fill-quarter="1"]').click();
+    await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('120');
+    await page.locator('[data-input="input_vat"][data-quarter="1"]').fill('10');
+    await page.locator('[data-input="non_vat_deduction"][data-quarter="1"]').fill('2');
+    await page.locator('[data-input="cost_of_sales"][data-quarter="1"]').fill('50');
+    // Статья создаётся сразу, но черновик всех четырёх кварталов не теряется.
+    await page.locator('#add-category').click();
     await page.locator('#category-name').fill('Реклама — тест');
-    await page.locator('#category-tag').fill('A');
+    await page.locator('#category-rate').fill('20');
+    await page.locator('#category-kind').selectOption('fixed');
     await page.locator('#category-form button[type="submit"]').click();
-    await page.waitForSelector('#category-dialog', { state: 'hidden' });
-    assert.strictEqual(await page.locator('#field-retail_revenue').inputValue(), '120');
-    const categoryInput = page.locator('.expense-input').filter({ hasText: 'Реклама — тест' }).locator('input');
-    await categoryInput.fill('3');
-    await page.locator('#period-form button[type="submit"]').click();
-    await page.waitForFunction(() => document.querySelector('#entry-status').textContent === 'Сохранён');
-    await page.locator('.navigation [data-view="overview"]').click();
-    const netProfit = page.locator('#financial-table-body tr').filter({ hasText: 'Чистая прибыль' }).first();
-    assert.strictEqual((await netProfit.locator('td').nth(1).innerText()).replace(/\s/g, ''), '37,60');
-    assert.strictEqual(await netProfit.locator('td').nth(2).innerText(), '—');
+    const categoryRow = page.locator('#sheet-body tr').filter({ hasText: 'Реклама — тест' });
+    await categoryRow.waitFor({ state: 'visible' });
+    assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '120');
+    await categoryRow.locator('[data-expense][data-quarter="1"]').fill('3');
+    await page.waitForFunction(() => document.querySelector('[data-metric="net_profit"][data-quarter="1"]').textContent.replace(/\s/g, '') === '37,60');
+    const breakEvenRow = page.locator('#analysis-body tr').filter({ hasText: 'Точка безубыточности' });
+    await page.waitForFunction(() => [...document.querySelectorAll('#analysis-body tr')].some((r) => r.textContent.includes('Точка безубыточности') && r.cells[1].textContent.trim() === '6,00'));
+    assert.strictEqual((await breakEvenRow.locator('td').nth(1).innerText()).trim(), '6,00');
     assert((await page.locator('#deduction-note').innerText()).includes('H17'));
+    await page.locator('#year-form button[type="submit"]').first().click();
+    await page.waitForFunction(() => document.querySelector('#q-status-1').textContent === 'сохранён');
+    assert.strictEqual(await page.locator('#q-status-2').innerText(), 'нет данных');
+    assert(await page.locator('#break-even-chart').isVisible(), 'График порога должен появиться');
 
-    await page.locator('.navigation [data-view="expenses"]').click();
-    const categoryRow = page.locator('#expenses-table-body tr').filter({ hasText: 'Реклама — тест' });
-    await categoryRow.locator('button').click();
-    await page.waitForFunction(() => [...document.querySelectorAll('#expenses-table-body tr')].some((r) => r.textContent.includes('Реклама — тест') && r.textContent.includes('архив')));
-    await page.locator('.navigation [data-view="entry"]').click();
-    assert.strictEqual(await page.locator('.expense-input').filter({ hasText: 'Реклама — тест' }).locator('input').inputValue(), '3');
-    const savedArchivedPeriod = page.waitForResponse((response) => response.url().endsWith('/api/period') && response.request().method() === 'POST');
-    await page.locator('#period-form button[type="submit"]').click();
-    assert.strictEqual((await savedArchivedPeriod).status(), 200);
-    await page.waitForLoadState('networkidle');
-    await page.locator('.navigation [data-view="overview"]').click();
-    assert.strictEqual((await netProfit.locator('td').nth(1).innerText()).replace(/\s/g, ''), '37,60');
+    // Два окна не должны молча перезаписывать друг друга.
+    const second = await page.context().newPage();
+    second.on('dialog', (dialog) => dialog.accept());
+    await second.goto(url, { waitUntil: 'networkidle' });
+    await second.waitForFunction(() => document.querySelector('#context-year').textContent.includes('2030'));
+    await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('121');
+    const savedFirst = page.waitForResponse((response) => response.url().endsWith('/api/year') && response.request().method() === 'POST');
+    await page.locator('#year-form button[type="submit"]').first().click();
+    assert.strictEqual((await savedFirst).status(), 200);
+    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('#save-status').textContent.includes('сохранены'));
+    await second.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('122');
+    const staleSave = second.waitForResponse((response) => response.url().endsWith('/api/year') && response.request().method() === 'POST');
+    await second.locator('#year-form button[type="submit"]').first().click();
+    assert.strictEqual((await staleSave).status(), 400);
+    await second.waitForFunction(() => document.querySelector('#toast').textContent.includes('другом окне'));
+    assert.strictEqual(await second.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '122');
+    assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '121');
+    await second.close();
+    await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('120');
+    const restored = page.waitForResponse((response) => response.url().endsWith('/api/year') && response.request().method() === 'POST');
+    await page.locator('#year-form button[type="submit"]').first().click();
+    assert.strictEqual((await restored).status(), 200);
+    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('#save-status').textContent.includes('сохранены'));
 
+    const [xlsxDownload] = await Promise.all([page.waitForEvent('download'), page.locator('#export-xlsx').click()]);
+    const xlsx = path.join(temp, 'report.xlsx'); await xlsxDownload.saveAs(xlsx);
+    assert.strictEqual(fs.readFileSync(xlsx).subarray(0, 2).toString(), 'PK');
     const [csvDownload] = await Promise.all([page.waitForEvent('download'), page.locator('#export-csv').click()]);
     assert(fs.readFileSync(await csvDownload.path(), 'utf8').includes('37,6'), 'CSV должен содержать рассчитанную прибыль');
-    await page.locator('.navigation [data-view="history"]').click();
     const [backupDownload] = await Promise.all([page.waitForEvent('download'), page.locator('#backup').click()]);
-    assert(fs.readFileSync(await backupDownload.path()).subarray(0, 15).toString() === 'SQLite format 3');
+    assert.strictEqual(fs.readFileSync(await backupDownload.path()).subarray(0, 15).toString(), 'SQLite format 3');
     await page.reload({ waitUntil: 'networkidle' });
-    await page.locator('.navigation [data-view="overview"]').click();
-    assert.strictEqual((await netProfit.locator('td').nth(1).innerText()).replace(/\s/g, ''), '37,60', 'Квартал должен сохраниться после перезапуска страницы');
+    assert.strictEqual((await page.locator('[data-metric="net_profit"][data-quarter="1"]').innerText()).replace(/\s/g, ''), '37,60');
+    assert.strictEqual(await categoryRow.locator('[data-kind]').inputValue(), 'fixed');
+
+    // Экспорт своей книги и явный импорт в выбранный ДРУГОЙ год.
+    await page.locator('#year-input').fill('2031'); await page.locator('#year-input').press('Tab');
+    await page.waitForFunction(() => document.querySelector('#context-year').textContent.includes('2031'));
+    const importFile = async (file) => {
+      const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.locator('#import-xlsx').click()]);
+      await chooser.setFiles(file);
+      if (process.env.DEBUG_UI) console.log('FILE STATE', file, await page.locator('#xlsx-file').evaluate((el) => ({ name: el.files[0]?.name, size: el.files[0]?.size, value: el.value })));
+      try { await page.locator('#import-dialog').waitFor({ state: 'visible', timeout: 10000 }); }
+      catch (error) { throw new Error(`Не открылся предпросмотр ${file}: ${await page.locator('#toast').innerText()}\n${serverLogs}\n${error.message}`); }
+    };
+    await importFile(xlsx);
+    assert((await page.locator('#import-summary').innerText()).includes('2030'), 'Год файла должен быть показан');
+    assert((await page.locator('#import-summary').innerText()).includes('2031'), 'Год назначения должен быть показан');
+    assert(await page.locator('#import-apply').isDisabled());
+    await page.locator('#import-confirm').check(); await page.locator('#import-apply').click();
+    await page.locator('#import-dialog').waitFor({ state: 'hidden' });
+    await page.waitForFunction(() => document.querySelector('#q-status-1').textContent === 'сохранён');
+    assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '120');
+    assert.strictEqual(await categoryRow.locator('[data-kind]').inputValue(), 'fixed');
+
+    // Импорт в уже заполненный квартал по умолчанию не заменяет значения.
+    await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('240');
+    await page.locator('#year-form button[type="submit"]').first().click();
+    await page.waitForFunction(() => document.querySelector('#q-status-1').textContent === 'сохранён' && document.querySelector('[data-input="retail_revenue"][data-quarter="1"]').value === '240');
+    await importFile(xlsx);
+    assert(await page.locator('#import-conflicts').isVisible());
+    assert(await page.locator('input[name="import-mode"][value="skip"]').isChecked());
+    assert(!(await page.locator('#import-settings').isChecked()), 'Настройки существующего года нельзя заменять по умолчанию');
+    await page.locator('input[name="import-mode"][value="replace"]').check();
+    await page.locator('#import-confirm').check(); await page.locator('#import-apply').click();
+    await page.locator('#import-dialog').waitFor({ state: 'hidden' });
+    await page.waitForFunction(() => document.querySelector('[data-input="retail_revenue"][data-quarter="1"]').value === '120');
+
+    // Оригинальный шаблон тоже принимается на проверку, но в тестовую БД не загружается.
+    const original = path.resolve(__dirname, '..', 'ОТЧЕТ ПО ОРГАНИЗАЦИИ мир.xlsx');
+    await importFile({ name: path.basename(original), mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer: fs.readFileSync(original) });
+    assert((await page.locator('#import-summary').innerText()).includes('1, 2, 3'));
+    await page.locator('[data-close-dialog="import-dialog"]').first().click();
+    await categoryRow.locator('[data-archive]').click();
+    await page.waitForFunction(() => [...document.querySelectorAll('#sheet-body tr')].some((r) => r.textContent.includes('Реклама — тест') && r.textContent.includes('архив')));
+    assert.strictEqual(await categoryRow.locator('[data-expense][data-quarter="1"]').inputValue(), '3');
     await page.setViewportSize({ width: 390, height: 844 });
     const sizes = await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]);
     assert(sizes[0] <= sizes[1], `Мобильная страница переполнена: ${sizes}`);
     assert.deepStrictEqual(errors, [], `Ошибки браузера: ${errors.join('; ')}`);
-    console.log('UI smoke test: организация, квартал, категории, расчёт, CSV, резервная копия и мобильный экран — OK.');
+    console.log('UI smoke: одна страница, четыре квартала, аналитика, безубыточность, XLSX roundtrip/замена, CSV, backup, мобильный экран — OK.');
   } finally {
     if (browser) await browser.close();
     if (child.exitCode === null) {

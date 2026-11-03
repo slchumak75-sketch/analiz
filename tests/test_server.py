@@ -101,3 +101,89 @@ def test_api_end_to_end_csv_and_backup(running_server):
     status, headers, data = request(base, "/api/backup", token=server.token)
     assert status == 200 and data.startswith(b"SQLite format 3\x00")
     assert "analiz-backup.sqlite3" in headers["Content-Disposition"]
+
+
+def request_xlsx(base, path, *, token=None, data=b'', origin=None, content_type=None):
+    headers = {'Content-Type': content_type or 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}
+    if token is not None:
+        headers['X-Analiz-Token'] = token
+    if origin is not None:
+        headers['Origin'] = origin
+    req = Request(base + path, data=data, method='POST', headers=headers)
+    try:
+        with urlopen(req, timeout=10) as response:
+            return response.status, response.headers, response.read()
+    except HTTPError as exc:
+        return exc.code, exc.headers, exc.read()
+
+
+def test_year_preview_and_excel_http_roundtrip(running_server):
+    server, base = running_server
+    org = server.store.create_organization('Тест', 'BYN')
+    oid = org['id']
+    cid = server.store.categories(oid)[0]['id']
+    inputs = {key: '0' for key in INPUT_FIELDS}
+    inputs.update(retail_revenue='120', cost_of_sales='50')
+    quarters = {str(q): {'inputs': {}, 'expenses': {}} for q in range(1, 5)}
+    quarters['1'] = {'inputs': inputs, 'expenses': {str(cid): '20'}}
+    payload = {'organization_id': oid, 'year': 2026, 'revision': server.store.summary(oid, 2026)['revision'], 'quarters': quarters,
+               'settings': {str(cid): {'cost_type': 'fixed', 'vat_rate': '0'}}}
+    status, _, data = request(base, '/api/year/preview', method='POST', token=server.token, headers={'Origin': base}, body=payload)
+    assert status == 200 and json.loads(data)['analysis']['break_even_revenue'] == '40'
+    assert server.store.summary(oid, 2026)['quarter_count'] == 0
+    status, _, _ = request(base, '/api/year', method='POST', token=server.token, headers={'Origin': base}, body=payload)
+    assert status == 200 and server.store.summary(oid, 2026)['quarter_count'] == 1
+    qs = urlencode({'organization_id': oid, 'year': 2026})
+    status, headers, exported = request(base, '/api/report.xlsx?' + qs, token=server.token)
+    assert status == 200 and exported.startswith(b'PK') and headers['Content-Type'].startswith('application/vnd.openxmlformats')
+    target_query = urlencode({'organization_id': oid, 'year': 2027})
+    endpoint = '/api/excel/preview?' + target_query
+    assert request_xlsx(base, endpoint, data=exported)[0] == 403
+    assert request_xlsx(base, endpoint, data=exported, token=server.token, origin='https://evil.example')[0] == 403
+    assert request_xlsx(base, endpoint, data=b'broken', token=server.token, origin=base)[0] == 400
+    status, _, data = request_xlsx(base, endpoint, data=exported, token=server.token, origin=base)
+    preview = json.loads(data)
+    assert status == 200 and preview['plan']['metadata']['year'] == '2026'
+    assert preview['plan']['year'] == 2027 and preview['plan']['all_existing_quarters'] == []
+    assert server.store.summary(oid, 2027)['quarter_count'] == 0
+    body = {'preview_token': preview['preview_token'], 'replace_existing': False, 'apply_settings': True}
+    status, _, data = request(base, '/api/excel/import', method='POST', token=server.token, headers={'Origin': base}, body=body)
+    assert status == 200 and json.loads(data)['imported_quarters'] == [1]
+    assert server.store.summary(oid, 2027)['analysis']['break_even_revenue'] == 40
+    assert request(base, '/api/excel/import', method='POST', token=server.token, headers={'Origin': base}, body=body)[0] == 400
+
+
+def test_import_preview_rechecks_revision_before_overwrite(running_server):
+    server, base = running_server
+    oid = server.store.create_organization('Конкурентная запись')['id']
+    inputs = {key: '0' for key in INPUT_FIELDS}
+    inputs['retail_revenue'] = '120'
+    server.store.save_period(oid, 2026, 1, inputs, {})
+    query = urlencode({'organization_id': oid, 'year': 2026})
+    exported = request(base, '/api/report.xlsx?' + query, token=server.token)[2]
+    status, _, data = request_xlsx(base, '/api/excel/preview?' + query, token=server.token, data=exported, origin=base)
+    assert status == 200
+    token = json.loads(data)['preview_token']
+    inputs['retail_revenue'] = '999'
+    server.store.save_period(oid, 2026, 1, inputs, {})  # другое окно изменило данные
+    payload = {'preview_token': token, 'replace_existing': True, 'apply_settings': True}
+    status, _, data = request(base, '/api/excel/import', method='POST', token=server.token, headers={'Origin': base}, body=payload)
+    assert status == 400 and 'другом окне' in json.loads(data)['error']
+    assert server.store.get_period(oid, 2026, 1)['inputs']['retail_revenue'] == '999'
+
+
+def test_adding_category_preserves_concurrent_edit_guard(running_server):
+    server, base = running_server
+    oid = server.store.create_organization('Черновик')['id']
+    revision = server.store.summary(oid, 2026)['revision']
+    inputs = {key: '0' for key in INPUT_FIELDS}
+    inputs['retail_revenue'] = '120'
+    server.store.save_period(oid, 2026, 1, inputs, {})
+    body = {'organization_id': oid, 'year': 2026, 'revision': revision, 'name': 'Новая статья', 'tag': '20'}
+    status, _, data = request(base, '/api/categories', method='POST', token=server.token, headers={'Origin': base}, body=body)
+    assert status == 400 and 'другом окне' in json.loads(data)['error']
+    assert all(item['name'] != 'Новая статья' for item in server.store.categories(oid))
+    body['revision'] = server.store.summary(oid, 2026)['revision']
+    status, _, data = request(base, '/api/categories', method='POST', token=server.token, headers={'Origin': base}, body=body)
+    assert status == 201
+    assert json.loads(data)['category']['year_revision'] == server.store.summary(oid, 2026)['revision']

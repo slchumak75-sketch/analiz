@@ -35,6 +35,9 @@ def self_test() -> None:
         result = store.summary(org["id"], 2026)
         assert result["annual"]["output_vat"] == Decimal("20")
         assert result["quarter_count"] == 1
+        from analiz.excel import make_report, parse_report
+        report = parse_report(make_report(result))
+        assert sorted(report["quarters"]) == [1] and report["metadata"]["year"] == "2026"
         assert (Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "web" / "index.html").exists()
         # Проверяем, что упакованный HTTP-сервер отдаёт HTML и health endpoint.
         from urllib.request import urlopen

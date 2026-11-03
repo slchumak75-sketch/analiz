@@ -1,4 +1,4 @@
-"""Экспорт отчёта в CSV; не содержит импорта исходной книги."""
+"""Экспорт отчёта в CSV по выбранной организации и году."""
 from __future__ import annotations
 
 import csv
@@ -61,7 +61,9 @@ def report_csv(summary: dict[str, Any]) -> bytes:
     writer.writerow([])
     writer.writerow(["", "Статьи затрат", "1 квартал", "2 квартал", "3 квартал", "4 квартал", "Итого"])
     for expense in summary["expenses"]:
-        name = expense["name"] + (f" · метка C: {expense['tag']}" if expense["tag"] else "")
+        name = expense["name"] + (f" · НДС: {expense['vat_rate']}%" if expense["vat_rate"] is not None else "")
+        kind = {"fixed": "постоянные", "variable": "переменные", "unclassified": "тип не указан"}[expense["cost_type"]]
+        name += f" · {kind}"
         writer.writerow([expense["source_row"] or "", safe_csv_text(name),
                          *[csv_number(n) for n in expense["quarters"]],
                          csv_number(expense["total"]) if summary["quarter_count"] else ""])

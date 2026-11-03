@@ -7,6 +7,7 @@ import secrets
 import sqlite3
 import sys
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,6 +16,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from .calculations import json_ready
+from .excel import MAX_XLSX_BYTES, make_report, parse_report
 from .reports import report_csv
 from .store import NotFoundError, Store
 
@@ -36,6 +38,8 @@ class AnalizServer(ThreadingHTTPServer):
         self.web_root = (web_root or resources_dir()).resolve()
         self.token = secrets.token_urlsafe(32)
         self.local_only = address[0] == "127.0.0.1"
+        self.import_previews: dict[str, dict[str, Any]] = {}
+        self.import_lock = threading.Lock()
         super().__init__(address, AnalizHandler)
 
 
@@ -167,6 +171,9 @@ class AnalizHandler(BaseHTTPRequestHandler):
             if path == "/api/report.csv":
                 summary = store.summary(query.get("organization_id"), query.get("year"))
                 return self._bytes(HTTPStatus.OK, report_csv(summary), "text/csv; charset=utf-8", filename=f"analiz-{summary['year']}.csv")
+            if path == "/api/report.xlsx":
+                summary = store.summary(query.get("organization_id"), query.get("year"))
+                return self._bytes(HTTPStatus.OK, make_report(summary), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=f"analiz-{summary['year']}.xlsx")
             if path == "/api/backup":
                 return self._bytes(HTTPStatus.OK, store.backup_bytes(), "application/vnd.sqlite3", filename="analiz-backup.sqlite3")
             # Явный список исключает чтение соседних файлов и обход путей.
@@ -193,12 +200,54 @@ class AnalizHandler(BaseHTTPRequestHandler):
             path, _ = self._query()
             if not self._guard(path, mutating=True):
                 return
-            body = self._body()
             store = self.server.store
+            if path == "/api/excel/preview":
+                if self.headers.get("Transfer-Encoding"):
+                    raise ValueError("Передача данных по частям не поддерживается.")
+                length = self.headers.get("Content-Length", "0")
+                if not length.isdigit() or not 0 < int(length) <= MAX_XLSX_BYTES:
+                    raise ValueError("Размер XLSX должен быть не более 10 МиБ.")
+                if "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" not in self.headers.get("Content-Type", "").lower():
+                    raise ValueError("Выберите файл XLSX.")
+                report = parse_report(self.rfile.read(int(length)))
+                _, query = self._query()
+                plan = store.import_plan(query.get("organization_id"), query.get("year"), report)
+                import_token = secrets.token_urlsafe(24)
+                with self.server.import_lock:
+                    now = time.monotonic()
+                    self.server.import_previews = {k: v for k, v in self.server.import_previews.items() if now - v["created"] < 600}
+                    if len(self.server.import_previews) >= 3:
+                        oldest = min(self.server.import_previews, key=lambda k: self.server.import_previews[k]["created"])
+                        del self.server.import_previews[oldest]
+                    self.server.import_previews[import_token] = {"created": now, "report": report, "organization_id": plan["organization"]["id"], "year": plan["year"], "revision": plan["revision"]}
+                return self._json(HTTPStatus.OK, {"preview_token": import_token, "plan": plan})
+            body = self._body()
+            if path == "/api/year/preview":
+                return self._json(HTTPStatus.OK, store.preview_year(body.get("organization_id"), body.get("year"), body.get("quarters"), body.get("settings")))
+            if path == "/api/year":
+                if not isinstance(body.get("revision"), str):
+                    raise ValueError("Версия данных отсутствует. Обновите страницу перед сохранением.")
+                return self._json(HTTPStatus.OK, store.save_year(body.get("organization_id"), body.get("year"), body.get("quarters"), body.get("settings"), expected_revision=body["revision"]))
+            if path == "/api/excel/import":
+                preview_token = body.get("preview_token")
+                if not isinstance(preview_token, str):
+                    raise ValueError("Сначала проверьте файл XLSX.")
+                with self.server.import_lock:
+                    saved = self.server.import_previews.get(preview_token)
+                    if not saved or time.monotonic() - saved["created"] >= 600:
+                        raise ValueError("Предпросмотр устарел. Загрузите файл ещё раз.")
+                    result = store.import_year(saved["organization_id"], saved["year"], saved["report"],
+                        replace_existing=body.get("replace_existing"), apply_settings=body.get("apply_settings"),
+                        expected_revision=saved["revision"])
+                    self.server.import_previews.pop(preview_token, None)
+                return self._json(HTTPStatus.OK, result)
             if path == "/api/organizations":
                 return self._json(HTTPStatus.CREATED, {"organization": store.create_organization(body.get("name"), body.get("currency", ""))})
             if path == "/api/categories":
-                return self._json(HTTPStatus.CREATED, {"category": store.add_category(body.get("organization_id"), body.get("name"), body.get("tag", ""))})
+                revision = body.get("revision")
+                if (revision is not None or body.get("year") is not None) and not isinstance(revision, str):
+                    raise ValueError("Версия данных отсутствует. Обновите страницу перед добавлением статьи.")
+                return self._json(HTTPStatus.CREATED, {"category": store.add_category(body.get("organization_id"), body.get("name"), body.get("tag", ""), year=body.get("year"), expected_revision=revision)})
             if path == "/api/period":
                 period = store.save_period(body.get("organization_id"), body.get("year"), body.get("quarter"), body.get("inputs"), body.get("expenses"))
                 return self._json(HTTPStatus.OK, {"period": period})

@@ -31,113 +31,64 @@
   <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
   <symbol id="i-logout" viewBox="0 0 24 24"><path d="M10 4H5v16h5M14 8l4 4-4 4M8 12h10"/></symbol>
 </svg>
-<div class="shell" id="application">
-  <aside class="sidebar">
-    <a href="#overview" class="brand" data-view="overview" aria-label="Анализ организаций — на главную">
-      <span class="brand-mark"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 23h4V14H7v9Zm7 0h4V9h-4v14Zm7 0h4V5h-4v18Z" fill="currentColor"/><path d="M6 26h20" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span>
-      <span><strong>Анализ</strong><small>организаций</small></span>
-    </a>
-    <div class="nav-label">РАБОЧЕЕ ПРОСТРАНСТВО</div>
-    <nav class="navigation" aria-label="Разделы приложения">
-      <button class="nav-item active" data-view="overview"><svg><use href="#i-grid"/></svg><span>Обзор</span><span class="nav-indicator"></span></button>
-      <button class="nav-item" data-view="entry"><svg><use href="#i-edit"/></svg><span>Ввод данных</span></button>
-      <button class="nav-item" data-view="expenses"><svg><use href="#i-stack"/></svg><span>Затраты</span></button>
-      <button class="nav-item" data-view="history"><svg><use href="#i-chart"/></svg><span>Сравнение лет</span></button>
-    </nav>
-    <div class="sidebar-spacer"></div>
-    <div class="privacy-card"><span class="privacy-icon"><svg><use href="#i-lock"/></svg></span><div><strong>Ваши данные — ваши</strong><p>Хранятся только на этом компьютере</p></div></div>
-    <button class="nav-item exit-button" id="shutdown"><svg><use href="#i-logout"/></svg><span>Завершить работу</span></button>
-    <div class="version">Локальное приложение <span>·</span> v1.0</div>
-  </aside>
+<div id="application">
+  <header class="app-topbar">
+    <div class="brand"><span class="brand-mark"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 23h4V14H7v9Zm7 0h4V9h-4v14Zm7 0h4V5h-4v18Z" fill="currentColor"/><path d="M6 26h20" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span><span><strong>Анализ</strong><small>организаций</small></span></div>
+    <div class="top-actions">
+      <div class="organization-select-wrap"><svg><use href="#i-building"/></svg><label class="sr-only" for="organization-select">Организация</label><select id="organization-select"><option value="">Нет организации</option></select></div>
+      <button class="icon-button" id="add-organization" title="Добавить организацию" aria-label="Добавить организацию"><svg><use href="#i-plus"/></svg></button>
+      <button class="icon-button" id="manage-organization" title="Настроить организацию" aria-label="Настроить организацию"><svg><use href="#i-edit"/></svg></button>
+      <div class="year-picker" title="Отчётный год"><button id="year-prev" aria-label="Предыдущий год">‹</button><label class="sr-only" for="year-input">Год</label><input id="year-input" type="number" min="1900" max="9999" inputmode="numeric"><button id="year-next" aria-label="Следующий год">›</button></div>
+      <button class="button button-light top-action" id="import-xlsx"><svg><use href="#i-arrow"/></svg><span>Загрузить Excel</span></button>
+      <button class="button button-primary top-action" id="export-xlsx"><svg><use href="#i-down"/></svg><span>Выгрузить Excel</span></button>
+      <button class="icon-button" id="backup" title="Скачать резервную копию" aria-label="Скачать резервную копию"><svg><use href="#i-lock"/></svg></button>
+      <button class="icon-button" id="shutdown" title="Завершить работу" aria-label="Завершить работу"><svg><use href="#i-logout"/></svg></button>
+      <input id="xlsx-file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" class="hidden">
+    </div>
+  </header>
+  <main class="main">
+    <div id="fatal-error" class="notice notice-error hidden" role="alert"></div>
+    <section id="empty-onboarding" class="onboarding hidden">
+      <div class="onboarding-illustration"><div class="illus-line one"></div><div class="illus-line two"></div><div class="illus-card"><svg><use href="#i-chart"/></svg></div><span class="illus-dot"></span></div>
+      <div class="eyebrow centered">ВАШЕ РАБОЧЕЕ ПРОСТРАНСТВО</div>
+      <h1>Начните с организации</h1>
+      <p>Создайте организацию, затем заполните показатели по кварталам на одной странице или загрузите таблицу Excel.</p>
+      <button class="button button-primary" id="onboarding-create"><svg><use href="#i-plus"/></svg>Добавить организацию</button>
+      <div class="onboarding-note"><svg><use href="#i-lock"/></svg>Данные хранятся только на этом компьютере</div>
+    </section>
+    <div id="main-content" class="hidden">
+      <div class="page-heading"><div><div class="eyebrow"><span class="eyebrow-dot"></span>ПРОДАЖИ · ЗАТРАТЫ · РЕЗУЛЬТАТ</div><h1>Финансы организации</h1><p>Таблица и вся аналитика — на одной странице</p></div><div class="privacy-inline"><svg><use href="#i-lock"/></svg>Локальное хранение</div></div>
+      <div class="context-line"><span class="context-label"><svg><use href="#i-building"/></svg><strong id="context-org"></strong></span><span class="context-divider"></span><span id="context-year"></span><span class="period-status" id="context-status"></span><span class="context-divider"></span><span id="currency-label"></span></div>
+      <div class="stats-grid" id="stats-grid"></div>
 
-  <div class="workspace">
-    <header class="topbar">
-      <div class="breadcrumb"><span>Рабочее пространство</span><svg><use href="#i-chevron"/></svg><strong id="breadcrumb-current">Обзор</strong></div>
-      <div class="top-actions">
-        <div class="organization-select-wrap"><svg><use href="#i-building"/></svg><label class="sr-only" for="organization-select">Организация</label><select id="organization-select" aria-label="Выбрать организацию"><option value="">Нет организации</option></select></div>
-        <button class="icon-button" id="add-organization" title="Добавить организацию" aria-label="Добавить организацию"><svg><use href="#i-plus"/></svg></button>
-        <button class="icon-button" id="manage-organization" title="Настроить организацию" aria-label="Настроить организацию"><svg><use href="#i-edit"/></svg></button>
-        <div class="year-picker" title="Отчётный год"><button id="year-prev" aria-label="Предыдущий год">‹</button><label class="sr-only" for="year-input">Год</label><input id="year-input" type="number" min="1900" max="9999" inputmode="numeric" aria-label="Отчётный год"><button id="year-next" aria-label="Следующий год">›</button></div>
-        <button class="button button-light top-export" id="export-csv"><svg><use href="#i-down"/></svg><span>Экспорт CSV</span></button>
-      </div>
-    </header>
-    <main class="main">
-      <div id="fatal-error" class="notice notice-error hidden" role="alert"></div>
-      <section id="empty-onboarding" class="onboarding hidden">
-        <div class="onboarding-illustration"><div class="illus-line one"></div><div class="illus-line two"></div><div class="illus-card"><svg><use href="#i-chart"/></svg></div><span class="illus-dot"></span></div>
-        <div class="eyebrow centered">ВАШЕ РАБОЧЕЕ ПРОСТРАНСТВО</div>
-        <h1>Начните с организации</h1>
-        <p>Добавьте организацию и вносите показатели по кварталам. Программа рассчитает прибыль, налоги и покажет динамику.</p>
-        <button class="button button-primary" id="onboarding-create"><svg><use href="#i-plus"/></svg>Добавить организацию</button>
-        <div class="onboarding-note"><svg><use href="#i-lock"/></svg>Исходные данные из Excel не загружаются автоматически</div>
+      <form id="year-form" novalidate>
+        <article class="card workbook-card">
+          <div class="card-heading sheet-heading"><div><div class="section-kicker">КВАРТАЛЬНЫЙ ОТЧЁТ</div><h2>Таблица показателей</h2><p>Поля ввода выделены зелёным; остальные значения рассчитываются автоматически.</p></div><div class="heading-actions"><button type="button" class="button button-light" id="add-category"><svg><use href="#i-plus"/></svg>Статья затрат</button><button type="submit" class="button button-primary"><svg><use href="#i-check"/></svg>Сохранить</button></div></div>
+          <div class="sheet-note"><svg><use href="#i-info"/></svg><span>Строки и формулы соответствуют исходной таблице. Для нового квартала заполните 7 основных показателей; пустые статьи затрат равны нулю. <strong>НДС статьи — только ставка</strong>, общий входящий НДС вводится вручную.</span></div>
+          <div class="table-scroll sheet-scroll"><table class="data-table sheet-table"><thead><tr><th>Показатель / статья затрат</th><th>НДС, %</th><th>Тип затрат</th><th><div>1 квартал</div><span id="q-status-1" class="quarter-state"></span><span class="quarter-actions"><button type="button" data-fill-quarter="1" title="Заполнить пустые основные поля нулями">+ нули</button><button type="button" data-delete-quarter="1" title="Удалить сохранённый квартал">×</button></span></th><th><div>2 квартал</div><span id="q-status-2" class="quarter-state"></span><span class="quarter-actions"><button type="button" data-fill-quarter="2" title="Заполнить пустые основные поля нулями">+ нули</button><button type="button" data-delete-quarter="2" title="Удалить сохранённый квартал">×</button></span></th><th><div>3 квартал</div><span id="q-status-3" class="quarter-state"></span><span class="quarter-actions"><button type="button" data-fill-quarter="3" title="Заполнить пустые основные поля нулями">+ нули</button><button type="button" data-delete-quarter="3" title="Удалить сохранённый квартал">×</button></span></th><th><div>4 квартал</div><span id="q-status-4" class="quarter-state"></span><span class="quarter-actions"><button type="button" data-fill-quarter="4" title="Заполнить пустые основные поля нулями">+ нули</button><button type="button" data-delete-quarter="4" title="Удалить сохранённый квартал">×</button></span></th><th>Итого за год</th></tr></thead><tbody id="sheet-body"></tbody></table></div>
+          <div class="sheet-footer"><div><strong id="save-status">Все изменения сохранены</strong><span id="preview-status">Данные на вашем компьютере</span></div><button type="submit" class="button button-primary"><svg><use href="#i-check"/></svg>Сохранить изменения</button></div>
+          <div class="formula-note" id="deduction-note"></div>
+        </article>
+      </form>
+
+      <section class="section-block" aria-labelledby="assessment-title"><div class="section-heading"><div><div class="eyebrow"><span class="eyebrow-dot"></span>ИНТЕРПРЕТАЦИЯ РЕЗУЛЬТАТОВ</div><h2 id="assessment-title">Аналитика и оценка</h2><p>Показатели по введённым кварталам, без предположений о неуказанных данных</p></div></div><div class="assessment-grid" id="assessment-grid"></div></section>
+      <article class="card table-card analysis-table-card"><div class="card-heading table-heading"><div><div class="section-kicker">ВЫРУЧКА БЕЗ НДС</div><h2>Безубыточность и эффективность</h2><p>Себестоимость продаж — переменная. Для остальных статей укажите тип затрат в таблице выше.</p></div><span class="card-chip" id="analysis-year"></span></div><div class="table-scroll"><table class="data-table analysis-table"><thead><tr><th>Показатель</th><th>1 кв.</th><th>2 кв.</th><th>3 кв.</th><th>4 кв.</th><th>Итого</th></tr></thead><tbody id="analysis-body"></tbody></table></div><div class="formula-note"><strong>Точка безубыточности</strong> = постоянные затраты / (маржинальный доход / выручка без НДС). Расчёт предполагает сохранение структуры продаж и переменных затрат выбранного периода. Если есть неразделённые затраты или маржа неположительна, порог не вычисляется.</div></article>
+      <section class="section-block" aria-labelledby="charts-title"><div class="section-heading"><div><div class="eyebrow"><span class="eyebrow-dot"></span>НАГЛЯДНАЯ КАРТИНА</div><h2 id="charts-title">Детальные графики</h2><p>Продажи, затраты, точка безубыточности и динамика во времени</p></div></div>
+        <div class="charts-grid">
+          <article class="card chart-card"><div class="card-heading"><div><div class="section-kicker">ПРОДАЖИ И РЕЗУЛЬТАТ</div><h2>Динамика по кварталам</h2><p>Выручка с НДС, затраты и чистая прибыль</p></div></div><div class="chart-area"><canvas id="quarter-chart" role="img" aria-label="Продажи и результат по кварталам"></canvas><div class="chart-empty hidden" id="quarter-chart-empty">Введите данные, чтобы увидеть график</div></div></article>
+          <article class="card chart-card"><div class="card-heading"><div><div class="section-kicker">ЗАПАС ПРОЧНОСТИ</div><h2>Точка безубыточности</h2><p>Фактическая выручка без НДС и расчётный порог</p></div></div><div class="chart-area"><canvas id="break-even-chart" role="img" aria-label="Точка безубыточности по кварталам"></canvas><div class="chart-empty hidden" id="break-even-chart-empty">Укажите постоянные и переменные затраты</div></div></article>
+          <article class="card chart-card"><div class="card-heading"><div><div class="section-kicker">СТРУКТУРА</div><h2>Основные статьи затрат</h2><p>До 10 статей по абсолютной величине</p></div></div><div class="chart-area"><canvas id="expense-chart" role="img" aria-label="Структура расходов"></canvas><div class="chart-empty hidden" id="expense-chart-empty">Нет ненулевых затрат за год</div></div></article>
+          <article class="card chart-card"><div class="card-heading"><div><div class="section-kicker">СРАВНЕНИЕ ЛЕТ</div><h2>История организации</h2><p>Неполные годы отмечены количеством кварталов</p></div></div><div class="chart-area"><canvas id="history-chart" role="img" aria-label="Динамика по годам"></canvas><div class="chart-empty hidden" id="history-chart-empty">Добавьте квартальные данные</div></div></article>
+          <article class="card chart-card chart-wide"><div class="card-heading"><div><div class="section-kicker">ПО ФОРМУЛАМ КНИГИ</div><h2>НДС и налог на прибыль</h2><p>Расчётные налоговые показатели по кварталам</p></div></div><div class="chart-area tax-chart"><canvas id="tax-chart" role="img" aria-label="НДС и налог на прибыль"></canvas><div class="chart-empty hidden" id="tax-chart-empty">Нет данных за выбранный год</div></div></article>
+        </div>
       </section>
-
-      <div id="main-content" class="hidden">
-        <section class="view" id="view-overview" aria-labelledby="overview-title">
-          <div class="page-heading">
-            <div><div class="eyebrow"><span class="eyebrow-dot"></span>ФИНАНСОВЫЙ ОБЗОР</div><h1 id="overview-title">Финансы организации</h1><p id="overview-subtitle">Показатели за выбранный период</p></div>
-            <button class="button button-primary" data-open-entry><svg><use href="#i-plus"/></svg>Ввести квартал</button>
-          </div>
-          <div class="context-line"><span class="context-label"><svg><use href="#i-building"/></svg><strong id="context-org"></strong></span><span class="context-divider"></span><span id="context-year"></span><span class="period-status" id="context-status"></span></div>
-          <div class="stats-grid" id="stats-grid"></div>
-          <div class="dashboard-grid">
-            <article class="card chart-card main-chart-card">
-              <div class="card-heading"><div><div class="section-kicker">ВЫРУЧКА И РЕЗУЛЬТАТ</div><h2>Динамика по кварталам</h2><p>Выручка с НДС, затраты и чистая прибыль</p></div><span class="card-chip" id="chart-year">2026</span></div>
-              <div class="chart-area"><canvas id="quarter-chart" aria-label="График выручки, затрат и чистой прибыли по кварталам" role="img"></canvas><div class="chart-empty hidden" id="quarter-chart-empty">Добавьте квартальные данные, чтобы увидеть динамику</div></div>
-              <div class="card-footnote"><span class="legend-dot accent"></span> Отсутствующие кварталы не отображаются как нули</div>
-            </article>
-            <article class="card chart-card expense-chart-card">
-              <div class="card-heading"><div><div class="section-kicker">СТРУКТУРА</div><h2>Основные затраты</h2><p>По статьям за введённые кварталы</p></div><button class="link-icon" data-view="expenses" aria-label="Все затраты"><svg><use href="#i-arrow"/></svg></button></div>
-              <div class="chart-area expense-chart-area"><canvas id="expense-chart" aria-label="График основных статей затрат" role="img"></canvas><div class="chart-empty hidden" id="expense-chart-empty">Здесь появятся статьи с ненулевыми затратами</div></div>
-              <div class="card-footnote">Показаны до 7 статей по абсолютной величине</div>
-            </article>
-          </div>
-          <div class="insight-row" id="insight-row"></div>
-          <article class="card table-card">
-            <div class="card-heading table-heading"><div><div class="section-kicker">ПО ДАННЫМ ТАБЛИЦЫ EXCEL</div><h2>Расчёт показателей</h2><p>Все строки исходного отчёта с разбивкой по кварталам</p></div><button class="button button-quiet" id="overview-export"><svg><use href="#i-down"/></svg>Скачать</button></div>
-            <div class="table-scroll"><table class="data-table financial-table"><thead><tr><th>Показатель</th><th>1 кв.</th><th>2 кв.</th><th>3 кв.</th><th>4 кв.</th><th>Итого</th></tr></thead><tbody id="financial-table-body"></tbody></table></div>
-            <div class="formula-note" id="deduction-note"></div>
-          </article>
-        </section>
-
-        <section class="view hidden" id="view-entry" aria-labelledby="entry-title">
-          <div class="page-heading"><div><div class="eyebrow"><span class="eyebrow-dot"></span>ДАННЫЕ ОРГАНИЗАЦИИ</div><h1 id="entry-title">Ввод данных</h1><p>Заполните показатели за квартал. Расчётные строки программа определит сама.</p></div><button class="button button-light" data-view="overview"><svg><use href="#i-grid"/></svg>К обзору</button></div>
-          <div class="quarter-toolbar"><div><div class="toolbar-label">ВЫБЕРИТЕ КВАРТАЛ</div><div class="quarter-tabs" id="quarter-tabs"></div></div><div class="quarter-info"><span id="entry-period-label"></span><span class="status-pill" id="entry-status"></span></div></div>
-          <div class="notice notice-info"><svg><use href="#i-info"/></svg><span>Ставки НДС и налога на прибыль — <strong>20%</strong>, как в исходной книге. Пустые затраты считаются нулём; семь основных показателей обязательны.</span></div>
-          <form id="period-form" novalidate>
-            <div class="entry-layout">
-              <div class="entry-main">
-                <article class="card form-card"><div class="form-card-heading"><span class="number-pill">01</span><div><h2>Продажи и себестоимость</h2><p>Суммы за выбранный квартал</p></div></div><div class="fields-grid" id="sales-fields"></div></article>
-                <article class="card form-card"><div class="form-card-heading"><span class="number-pill">02</span><div><h2>НДС и вычеты</h2><p>Введите показатели из вашего учёта</p></div></div><div class="fields-grid" id="vat-fields"></div></article>
-                <article class="card form-card expenses-form-card"><div class="form-card-heading"><span class="number-pill">03</span><div><h2>Статьи затрат</h2><p>Пустая сумма означает 0. При необходимости добавьте свою статью.</p></div><button type="button" class="button button-light small" id="add-category-entry"><svg><use href="#i-plus"/></svg>Добавить статью</button></div><div id="expense-inputs" class="expenses-input-grid"></div></article>
-              </div>
-              <aside class="entry-aside"><div class="card help-card"><div class="help-icon"><svg><use href="#i-info"/></svg></div><h3>Как заполнить</h3><ol><li>Выберите год и квартал.</li><li>Заполните 7 основных полей. Если суммы нет, введите 0.</li><li>Укажите затраты по нужным статьям и сохраните.</li></ol><div class="help-divider"></div><p>Числа можно вводить с запятой или точкой. Отрицательные значения допустимы.</p><button type="button" class="text-link" id="fill-zero">Заполнить пустые основные поля нулями</button></div></aside>
-            </div>
-            <div class="save-bar"><div><strong id="savebar-title">Новый квартал</strong><span>Данные сохраняются на вашем компьютере</span></div><div class="save-actions"><button type="button" class="button button-danger-quiet hidden" id="delete-period">Удалить квартал</button><button type="submit" class="button button-primary"><svg><use href="#i-check"/></svg>Сохранить квартал</button></div></div>
-          </form>
-        </section>
-
-        <section class="view hidden" id="view-expenses" aria-labelledby="expenses-title">
-          <div class="page-heading"><div><div class="eyebrow"><span class="eyebrow-dot"></span>АНАЛИЗ ЗАТРАТ</div><h1 id="expenses-title">Затраты по статьям</h1><p>Детализация расходов и вклад каждой статьи в итог</p></div><button class="button button-primary" id="add-category-expenses"><svg><use href="#i-plus"/></svg>Добавить статью</button></div>
-          <div class="expense-summary" id="expense-summary"></div>
-          <article class="card chart-card wide-chart-card"><div class="card-heading"><div><div class="section-kicker">СТРУКТУРА ЗАТРАТ</div><h2>На что расходуются средства</h2><p>До 15 крупнейших статей по абсолютной величине; все статьи — в таблице ниже</p></div><span class="card-chip" id="expense-year"></span></div><div class="chart-area full-expense-chart"><canvas id="all-expenses-chart" aria-label="График затрат по статьям" role="img"></canvas><div class="chart-empty hidden" id="all-expenses-empty">Для графика нужны ненулевые затраты</div></div></article>
-          <article class="card table-card"><div class="card-heading table-heading"><div><div class="section-kicker">ДЕТАЛИЗАЦИЯ</div><h2>Все статьи затрат</h2><p>Метка C перенесена из книги и не влияет на расчёты.</p></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Статья</th><th>1 кв.</th><th>2 кв.</th><th>3 кв.</th><th>4 кв.</th><th>Итого</th><th><span class="sr-only">Действия</span></th></tr></thead><tbody id="expenses-table-body"></tbody></table></div></article>
-        </section>
-
-        <section class="view hidden" id="view-history" aria-labelledby="history-title">
-          <div class="page-heading"><div><div class="eyebrow"><span class="eyebrow-dot"></span>СРАВНЕНИЕ ПЕРИОДОВ</div><h1 id="history-title">Динамика по годам</h1><p>Выручка, затраты, прибыль и налоговые показатели в разрезе лет</p></div><button class="button button-light" id="backup"><svg><use href="#i-down"/></svg>Резервная копия</button></div>
-          <div class="notice notice-info"><svg><use href="#i-info"/></svg><span>Годовые суммы включают только сохранённые кварталы. Неполные годы отмечены на графике; сравнивайте одинаковые периоды.</span></div>
-          <div class="history-grid"><article class="card chart-card wide-chart-card"><div class="card-heading"><div><div class="section-kicker">ВЫРУЧКА, ЗАТРАТЫ И ПРИБЫЛЬ</div><h2>История организации</h2><p>Итоги по годам</p></div></div><div class="chart-area history-chart-area"><canvas id="history-chart" aria-label="График по годам" role="img"></canvas><div class="chart-empty hidden" id="history-chart-empty">Сохраните квартал, чтобы увидеть историю</div></div></article>
-          <article class="card chart-card wide-chart-card"><div class="card-heading"><div><div class="section-kicker">НАЛОГОВЫЕ ПОКАЗАТЕЛИ</div><h2>Налоги по кварталам</h2><p>По формулам исходной книги за выбранный год</p></div><span class="card-chip" id="tax-year"></span></div><div class="chart-area tax-chart-area"><canvas id="tax-chart" aria-label="Налоги по кварталам" role="img"></canvas><div class="chart-empty hidden" id="tax-chart-empty">Нет данных за выбранный год</div></div></article></div>
-          <article class="card table-card"><div class="card-heading table-heading"><div><div class="section-kicker">ИСТОРИЯ</div><h2>Годовые итоги</h2><p>Обратите внимание на количество сохранённых кварталов</p></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Год</th><th>Кварталы</th><th>Выручка с НДС</th><th>Себестоимость и затраты</th><th>Прибыль</th><th>Чистая прибыль</th></tr></thead><tbody id="history-table-body"></tbody></table></div></article>
-        </section>
-      </div>
-    </main>
-  </div>
+      <footer class="app-footer"><span><svg><use href="#i-lock"/></svg>Ваши данные хранятся локально</span><div><button class="text-link" id="export-csv">Скачать CSV</button><span>·</span><button class="text-link" id="backup-footer">Резервная копия</button><span>·</span><span>Анализ организаций v2.0</span></div></footer>
+    </div>
+  </main>
 </div>
-
 <dialog id="organization-dialog" class="modal"><form id="organization-form" class="modal-form" novalidate><div class="modal-header"><div><div class="section-kicker">ОРГАНИЗАЦИЯ</div><h2 id="organization-dialog-title">Добавить организацию</h2></div><button type="button" class="icon-button" data-close-dialog="organization-dialog" aria-label="Закрыть"><svg><use href="#i-close"/></svg></button></div><p class="modal-intro">Создайте отдельное пространство для квартальных данных и истории.</p><label class="field"><span>Название организации <b>*</b></span><input id="org-name" maxlength="120" required autocomplete="off" placeholder="Введите название"></label><label class="field"><span>Валюта или единица измерения <small>необязательно</small></span><input id="org-currency" maxlength="20" autocomplete="off" placeholder="Например, BYN"><em>Только подпись: валюты не конвертируются.</em></label><div class="modal-footer"><button type="button" class="button button-danger-quiet hidden" id="delete-organization">Удалить организацию</button><span></span><button type="button" class="button button-light" data-close-dialog="organization-dialog">Отмена</button><button type="submit" class="button button-primary" id="org-save">Добавить</button></div></form></dialog>
-<dialog id="category-dialog" class="modal"><form id="category-form" class="modal-form" novalidate><div class="modal-header"><div><div class="section-kicker">СТАТЬИ ЗАТРАТ</div><h2>Новая статья</h2></div><button type="button" class="icon-button" data-close-dialog="category-dialog" aria-label="Закрыть"><svg><use href="#i-close"/></svg></button></div><p class="modal-intro">Статья будет доступна для всех кварталов этой организации.</p><label class="field"><span>Название статьи <b>*</b></span><input id="category-name" maxlength="120" required autocomplete="off" placeholder="Например, реклама"></label><label class="field"><span>Метка <small>необязательно</small></span><input id="category-tag" maxlength="40" autocomplete="off" placeholder="Для различения похожих статей"><em>Метка носит справочный характер и не влияет на расчёт.</em></label><div class="modal-footer"><span></span><button type="button" class="button button-light" data-close-dialog="category-dialog">Отмена</button><button type="submit" class="button button-primary">Добавить статью</button></div></form></dialog>
+<dialog id="category-dialog" class="modal"><form id="category-form" class="modal-form" novalidate><div class="modal-header"><div><div class="section-kicker">СТАТЬИ ЗАТРАТ</div><h2>Новая статья</h2></div><button type="button" class="icon-button" data-close-dialog="category-dialog" aria-label="Закрыть"><svg><use href="#i-close"/></svg></button></div><p class="modal-intro">Статья будет доступна во всех годах этой организации.</p><label class="field"><span>Название статьи <b>*</b></span><input id="category-name" maxlength="120" required autocomplete="off" placeholder="Например, реклама"></label><label class="field"><span>Ставка НДС, % <small>необязательно</small></span><input id="category-rate" inputmode="decimal" maxlength="12" autocomplete="off" placeholder="Например, 20"><em>Ставка показывается справочно и не меняет общий входящий НДС.</em></label><label class="field"><span>Тип затрат для выбранного года</span><select id="category-kind"><option value="unclassified">Не определён</option><option value="fixed">Постоянные</option><option value="variable">Переменные</option></select></label><div class="modal-footer"><span></span><button type="button" class="button button-light" data-close-dialog="category-dialog">Отмена</button><button type="submit" class="button button-primary">Добавить статью</button></div></form></dialog>
+<dialog id="import-dialog" class="modal modal-wide"><form id="import-form" class="modal-form"><div class="modal-header"><div><div class="section-kicker">ЗАГРУЗКА EXCEL</div><h2>Проверка перед импортом</h2></div><button type="button" class="icon-button" data-close-dialog="import-dialog" aria-label="Закрыть"><svg><use href="#i-close"/></svg></button></div><div class="import-summary" id="import-summary"></div><div id="import-conflicts" class="hidden"><div class="field-caption">ЕСЛИ КВАРТАЛ УЖЕ ЗАПОЛНЕН</div><label class="radio-line"><input type="radio" name="import-mode" value="skip" checked><span><strong>Пропустить существующие</strong><small>Будут загружены только новые кварталы.</small></span></label><label class="radio-line"><input type="radio" name="import-mode" value="replace"><span><strong>Заменить данными из файла</strong><small>Данные затронутых кварталов будут перезаписаны.</small></span></label></div><label class="check-line"><input type="checkbox" id="import-settings"><span>Применить ставки НДС и типы затрат из файла ко всему выбранному году, включая уже сохранённые кварталы.</span></label><label class="check-line important"><input type="checkbox" id="import-confirm"><span id="import-confirm-label"></span></label><div class="modal-footer"><span></span><button type="button" class="button button-light" data-close-dialog="import-dialog">Отмена</button><button type="submit" class="button button-primary" id="import-apply" disabled>Загрузить данные</button></div></form></dialog>
 <div class="toast hidden" id="toast" role="status" aria-live="polite"></div>
 </body>
 </html>

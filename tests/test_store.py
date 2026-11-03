@@ -139,3 +139,43 @@ def test_parallel_quarter_writes(store):
     summary = store.summary(oid, 2026)
     assert summary["quarter_count"] == 4
     assert summary["annual"]["revenue"] == 1000
+
+
+def test_existing_v1_database_is_migrated_without_losing_values(tmp_path):
+    import sqlite3
+    from analiz.store import Store
+    db = tmp_path / 'old.sqlite3'
+    with sqlite3.connect(db) as con:
+        con.executescript('''
+        CREATE TABLE organizations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, currency TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE categories (id INTEGER PRIMARY KEY, organization_id INTEGER NOT NULL, name TEXT NOT NULL, tag TEXT NOT NULL DEFAULT '', source_row INTEGER, position INTEGER NOT NULL, archived INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE periods (id INTEGER PRIMARY KEY, organization_id INTEGER NOT NULL, year INTEGER NOT NULL, quarter INTEGER NOT NULL,
+          retail_revenue TEXT NOT NULL, invoice_revenue TEXT NOT NULL, invoice_vat TEXT NOT NULL, non_vat_sales TEXT NOT NULL,
+          non_vat_deduction TEXT NOT NULL, input_vat TEXT NOT NULL, cost_of_sales TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(organization_id, year, quarter));
+        CREATE TABLE expenses (period_id INTEGER NOT NULL, category_id INTEGER NOT NULL, amount TEXT NOT NULL, PRIMARY KEY(period_id, category_id));
+        INSERT INTO organizations(id,name,currency) VALUES(1,'Старая организация','BYN');
+        INSERT INTO categories(id,organization_id,name,tag,source_row,position) VALUES(1,1,'фонд заработной платы','0',20,20);
+        INSERT INTO categories(id,organization_id,name,tag,source_row,position,archived) VALUES(2,1,'Старая статья','A',NULL,21,1);
+        INSERT INTO periods(id,organization_id,year,quarter,retail_revenue,invoice_revenue,invoice_vat,non_vat_sales,non_vat_deduction,input_vat,cost_of_sales)
+          VALUES(1,1,2022,1,'120.0001','0','0','0','0','0','50');
+        INSERT INTO expenses VALUES(1,1,'20.003');
+        INSERT INTO expenses VALUES(1,2,'7.2');
+        PRAGMA user_version=1;
+        ''')
+    s = Store(db)
+    with sqlite3.connect(db) as con:
+        assert con.execute('PRAGMA user_version').fetchone()[0] == 2
+    assert s.list_organizations()[0]['name'] == 'Старая организация'
+    period = s.get_period(1, 2022, 1)
+    assert period['inputs']['retail_revenue'] == '120.0001'
+    assert period['expenses'] == {'1': '20.003', '2': '7.2'}
+    cats = s.categories(1)
+    assert cats[0]['export_key'] == 'source:20'
+    assert cats[1]['export_key'].startswith('custom:') and cats[1]['archived'] == 1
+    summary = s.summary(1, 2022)
+    assert summary['quarter_count'] == 1
+    assert summary['expenses'][1]['vat_rate'] is None  # старая текстовая метка не угадывается
+    assert summary['analysis']['break_even_status'] == 'unclassified'
+    # Повторный запуск не применяет миграцию дважды.
+    assert Store(db).get_period(1, 2022, 1)['expenses']['2'] == '7.2'

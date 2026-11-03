@@ -7,14 +7,18 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from decimal import Decimal, localcontext
+import hashlib
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
 from typing import Any, Iterator
+from uuid import uuid4
 
+from .analytics import COST_TYPES, period_analysis
 from .calculations import INPUT_FIELDS, ZERO, calculate_quarter, calculate_year, decimal_text, parse_amount
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 INPUT_LABELS = {
     "retail_revenue": "Выручка ККМ с НДС",
     "invoice_revenue": "Реализация по накладным с НДС",
@@ -25,8 +29,8 @@ INPUT_LABELS = {
     "cost_of_sales": "Себестоимость реализации без НДС",
 }
 
-# Названия и значения из B20:C47 сохранены буквально. Столбец C не имеет
-# заголовка и нигде не используется в формулах — это НЕ ставка НДС в коде.
+# Названия и значения из B20:C47 сохранены буквально. Владелец подтвердил,
+# что C — ставка НДС, включая 25%. Она показывается, но не влияет на формулы.
 DEFAULT_CATEGORIES: tuple[tuple[int, str, str], ...] = (
     (20, "фонд заработной платы", "0"),
     (21, "фзн", "0"),
@@ -98,6 +102,16 @@ def clean_text(value: Any, label: str, max_length: int, *, required: bool = True
     if len(text) > max_length or any(ord(c) < 32 for c in text):
         raise ValueError(f"«{label}»: не более {max_length} символов и без управляющих знаков.")
     return text
+
+
+def valid_vat_rate(value: Any) -> str | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    rate = parse_amount(value, "Ставка НДС")
+    if not ZERO <= rate <= Decimal("100"):
+        raise ValueError("Ставка НДС должна быть от 0 до 100% или не указана.")
+    # Эквивалентные 25, 25.00 и 0.25 с форматом процентов — одна ставка.
+    return "0" if rate == ZERO else format(rate.normalize(), "f")
 
 
 class Store:
@@ -179,6 +193,26 @@ class Store:
                     BEGIN SELECT RAISE(ABORT, 'expense organization mismatch'); END;
                     PRAGMA user_version = 1;
                 """)
+            if version <= 1:
+                # Миграция без изменения прежних сумм; ключи нужны для обмена Excel.
+                # Выполняется одной транзакцией, чтобы сбой не оставил полусхему.
+                con.execute("BEGIN IMMEDIATE")
+                con.execute("ALTER TABLE categories ADD COLUMN export_key TEXT")
+                for row in con.execute("SELECT id, organization_id, source_row FROM categories ORDER BY id").fetchall():
+                    key = f"source:{row['source_row']}" if row["source_row"] is not None else f"custom:{uuid4().hex}"
+                    if con.execute("SELECT 1 FROM categories WHERE organization_id=? AND export_key=?", (row["organization_id"], key)).fetchone():
+                        key = f"custom:{uuid4().hex}"
+                    con.execute("UPDATE categories SET export_key=? WHERE id=?", (key, row["id"]))
+                con.execute("CREATE UNIQUE INDEX categories_export_key ON categories(organization_id, export_key)")
+                con.execute("""CREATE TABLE category_year_settings (
+                    category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+                    year INTEGER NOT NULL CHECK(year BETWEEN 1900 AND 9999),
+                    cost_type TEXT NOT NULL CHECK(cost_type IN ('fixed','variable','unclassified')),
+                    vat_rate TEXT,
+                    PRIMARY KEY(category_id, year)
+                )""")
+                con.execute("PRAGMA user_version = 2")
+                con.commit()
             con.execute("PRAGMA journal_mode = WAL")
 
     @staticmethod
@@ -202,9 +236,9 @@ class Store:
         with self.connection() as con:
             cursor = con.execute("INSERT INTO organizations(name, currency) VALUES (?, ?)", (name, currency))
             oid = cursor.lastrowid
-            con.executemany("""INSERT INTO categories(organization_id, name, tag, source_row, position)
-                               VALUES (?, ?, ?, ?, ?)""",
-                            [(oid, name, tag, row, row) for row, name, tag in DEFAULT_CATEGORIES])
+            con.executemany("""INSERT INTO categories(organization_id, name, tag, source_row, position, export_key)
+                               VALUES (?, ?, ?, ?, ?, ?)""",
+                            [(oid, name, tag, row, row, f"source:{row}") for row, name, tag in DEFAULT_CATEGORIES])
             return dict(self._organization(con, oid))
 
     def update_organization(self, organization_id: Any, name: Any, currency: Any) -> dict[str, Any]:
@@ -226,14 +260,27 @@ class Store:
             return [dict(row) for row in con.execute(
                 "SELECT * FROM categories WHERE organization_id=? ORDER BY position, id", (oid,))]
 
-    def add_category(self, organization_id: Any, name: Any, tag: Any = "") -> dict[str, Any]:
+    def add_category(self, organization_id: Any, name: Any, tag: Any = "", *,
+                     year: Any = None, expected_revision: Any = None) -> dict[str, Any]:
         name = clean_text(name, "Статья затрат", 120)
-        tag = clean_text(tag, "Метка", 40, required=False)
+        # Старые произвольные метки сохраняются как есть. Если это не число,
+        # ставка для года остаётся неопределённой, пока её не задаст пользователь.
+        tag = clean_text(tag, "Ставка НДС", 40, required=False)
+        y = valid_year(year) if expected_revision is not None else None
         with self.connection() as con:
+            con.execute("BEGIN IMMEDIATE")
             oid = self._organization(con, organization_id)["id"]
+            if y is not None:
+                self._check_revision(con, oid, y, expected_revision)
+            count = con.execute("SELECT COUNT(*) FROM categories WHERE organization_id=?", (oid,)).fetchone()[0]
+            if count >= 1000:
+                raise ValueError("Допускается не более 1000 статей затрат.")
             position = con.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM categories WHERE organization_id=?", (oid,)).fetchone()[0]
-            cursor = con.execute("INSERT INTO categories(organization_id,name,tag,position) VALUES(?,?,?,?)", (oid, name, tag, position))
-            return dict(con.execute("SELECT * FROM categories WHERE id=?", (cursor.lastrowid,)).fetchone())
+            cursor = con.execute("INSERT INTO categories(organization_id,name,tag,position,export_key) VALUES(?,?,?,?,?)", (oid, name, tag, position, f"custom:{uuid4().hex}"))
+            result = dict(con.execute("SELECT * FROM categories WHERE id=?", (cursor.lastrowid,)).fetchone())
+            if y is not None:
+                result["year_revision"] = self._year_revision(con, oid, y)
+            return result
 
     def update_category(self, organization_id: Any, category_id: Any, *, archived: Any) -> dict[str, Any]:
         if not isinstance(archived, bool):
@@ -249,6 +296,7 @@ class Store:
     def get_period(self, organization_id: Any, year: Any, quarter: Any) -> dict[str, Any] | None:
         y, q = valid_year(year), valid_quarter(quarter)
         with self.connection() as con:
+            con.execute("BEGIN")
             oid = self._organization(con, organization_id)["id"]
             row = con.execute("SELECT * FROM periods WHERE organization_id=? AND year=? AND quarter=?", (oid, y, q)).fetchone()
             if row is None:
@@ -258,13 +306,11 @@ class Store:
             return {"year": y, "quarter": q, "inputs": {key: row[key] for key in INPUT_FIELDS},
                     "expenses": expenses, "updated_at": row["updated_at"]}
 
-    def save_period(self, organization_id: Any, year: Any, quarter: Any,
-                    inputs: Any, expenses: Any) -> dict[str, Any]:
-        y, q = valid_year(year), valid_quarter(quarter)
+    @staticmethod
+    def _prepare_period(inputs: Any, expenses: Any) -> tuple[dict[str, Decimal], dict[int, Decimal]]:
         if not isinstance(inputs, dict) or not isinstance(expenses, dict):
             raise ValueError("Нужны показатели и список затрат квартала.")
-        unknown_inputs = set(inputs) - set(INPUT_FIELDS)
-        if unknown_inputs:
+        if set(inputs) - set(INPUT_FIELDS):
             raise ValueError("Неизвестный показатель квартала.")
         values = {key: parse_amount(inputs.get(key), INPUT_LABELS[key]) for key in INPUT_FIELDS}
         expense_values: dict[int, Decimal] = {}
@@ -275,26 +321,38 @@ class Store:
             if cid in expense_values:
                 raise ValueError("Статья затрат указана дважды.")
             expense_values[cid] = parse_amount(value, "Статья затрат", empty_zero=True)
+        return values, expense_values
+
+    @staticmethod
+    def _put_period(con: sqlite3.Connection, oid: int, y: int, q: int,
+                    values: dict[str, Decimal], expense_values: dict[int, Decimal],
+                    categories: dict[int, Any]) -> None:
+        if not set(expense_values).issubset(categories):
+            raise ValueError("В списке затрат есть статья другой организации или удалённая статья.")
+        fields_sql = ", ".join(INPUT_FIELDS)
+        placeholders = ", ".join("?" for _ in INPUT_FIELDS)
+        updates = ", ".join(f"{field}=excluded.{field}" for field in INPUT_FIELDS)
+        con.execute(f"""INSERT INTO periods(organization_id,year,quarter,{fields_sql})
+            VALUES (?,?,?,{placeholders}) ON CONFLICT(organization_id,year,quarter)
+            DO UPDATE SET {updates}, updated_at=CURRENT_TIMESTAMP""",
+            (oid, y, q, *(decimal_text(values[field]) for field in INPUT_FIELDS)))
+        pid = con.execute("SELECT id FROM periods WHERE organization_id=? AND year=? AND quarter=?", (oid, y, q)).fetchone()[0]
+        # Архивные статьи, отсутствующие в запросе, остаются нетронутыми.
+        replace_ids = {cid for cid, cat in categories.items() if not cat["archived"]} | set(expense_values)
+        con.executemany("DELETE FROM expenses WHERE period_id=? AND category_id=?", [(pid, cid) for cid in replace_ids])
+        con.executemany("INSERT INTO expenses(period_id,category_id,amount) VALUES(?,?,?)",
+                        [(pid, cid, decimal_text(value)) for cid, value in expense_values.items() if value != ZERO])
+
+    def save_period(self, organization_id: Any, year: Any, quarter: Any,
+                    inputs: Any, expenses: Any) -> dict[str, Any]:
+        y, q = valid_year(year), valid_quarter(quarter)
+        values, expense_values = self._prepare_period(inputs, expenses)
         with self.connection() as con:
+            con.execute("BEGIN IMMEDIATE")
             oid = self._organization(con, organization_id)["id"]
             categories = {row["id"]: row for row in con.execute(
                 "SELECT id, archived FROM categories WHERE organization_id=?", (oid,))}
-            if not set(expense_values).issubset(categories):
-                raise ValueError("В списке затрат есть статья другой организации или удалённая статья.")
-            fields_sql = ", ".join(INPUT_FIELDS)
-            placeholders = ", ".join("?" for _ in INPUT_FIELDS)
-            updates = ", ".join(f"{field}=excluded.{field}" for field in INPUT_FIELDS)
-            con.execute(f"""INSERT INTO periods(organization_id,year,quarter,{fields_sql})
-                VALUES (?,?,?,{placeholders}) ON CONFLICT(organization_id,year,quarter)
-                DO UPDATE SET {updates}, updated_at=CURRENT_TIMESTAMP""",
-                (oid, y, q, *(decimal_text(values[field]) for field in INPUT_FIELDS)))
-            pid = con.execute("SELECT id FROM periods WHERE organization_id=? AND year=? AND quarter=?", (oid, y, q)).fetchone()[0]
-            # Не стирать архивные статьи, которые старая форма не отправила.
-            replace_ids = {cid for cid, cat in categories.items() if not cat["archived"]} | set(expense_values)
-            if replace_ids:
-                con.executemany("DELETE FROM expenses WHERE period_id=? AND category_id=?", [(pid, cid) for cid in replace_ids])
-            con.executemany("INSERT INTO expenses(period_id,category_id,amount) VALUES(?,?,?)",
-                            [(pid, cid, decimal_text(value)) for cid, value in expense_values.items() if value != ZERO])
+            self._put_period(con, oid, y, q, values, expense_values, categories)
         result = self.get_period(oid, y, q)
         assert result is not None
         return result
@@ -307,13 +365,37 @@ class Store:
             if not result.rowcount:
                 raise NotFoundError("Этот квартал ещё не сохранён.")
 
-    def summary(self, organization_id: Any, year: Any) -> dict[str, Any]:
-        y = valid_year(year)
+    @staticmethod
+    def _year_revision(con: sqlite3.Connection, oid: int, year: int) -> str:
+        """Отпечаток защищает год от незаметной перезаписи из другого окна."""
+        category_rows = con.execute("""SELECT id,name,tag,source_row,position,archived,export_key
+                                     FROM categories WHERE organization_id=? ORDER BY id""", (oid,))
+        setting_rows = con.execute("""SELECT s.category_id,s.cost_type,s.vat_rate FROM category_year_settings s
+                                     JOIN categories c ON c.id=s.category_id
+                                     WHERE c.organization_id=? AND s.year=? ORDER BY s.category_id""", (oid, year))
+        fields_sql = ",".join(INPUT_FIELDS)
+        period_rows = con.execute(f"SELECT quarter,{fields_sql} FROM periods WHERE organization_id=? AND year=? ORDER BY quarter", (oid, year))
+        expense_rows = con.execute("""SELECT p.quarter,e.category_id,e.amount FROM expenses e
+                                     JOIN periods p ON p.id=e.period_id
+                                     WHERE p.organization_id=? AND p.year=? ORDER BY p.quarter,e.category_id""", (oid, year))
+        content = [oid, year, *[[tuple(row) for row in rows] for rows in (category_rows, setting_rows, period_rows, expense_rows)]]
+        return hashlib.sha256(json.dumps(content, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _check_revision(con: sqlite3.Connection, oid: int, year: int, expected: Any) -> None:
+        if expected is not None and (not isinstance(expected, str) or expected != Store._year_revision(con, oid, year)):
+            raise ValueError("Данные этого года изменились в другом окне. Скопируйте несохранённые значения, обновите страницу и повторите действие.")
+
+    def _snapshot(self, organization_id: Any, year: int) -> tuple[dict[str, Any], list[dict[str, Any]], dict[int, dict[int, dict[str, Any]]], dict[tuple[int, int], dict[str, Any]], str]:
+        """Согласованный снимок истории, разметки и версии выбранного года."""
         with self.connection() as con:
+            con.execute("BEGIN")
             organization = dict(self._organization(con, organization_id))
             oid = organization["id"]
-            categories = [dict(r) for r in con.execute(
-                "SELECT * FROM categories WHERE organization_id=? ORDER BY position,id", (oid,))]
+            categories = [dict(r) for r in con.execute("SELECT * FROM categories WHERE organization_id=? ORDER BY position,id", (oid,))]
+            settings = {(r["year"], r["category_id"]): dict(r) for r in con.execute(
+                """SELECT s.* FROM category_year_settings s JOIN categories c ON c.id=s.category_id
+                   WHERE c.organization_id=?""", (oid,))}
             rows = list(con.execute("SELECT * FROM periods WHERE organization_id=? ORDER BY year,quarter", (oid,)))
             all_expenses = con.execute("""SELECT e.period_id,e.category_id,e.amount FROM expenses e
                                         JOIN periods p ON p.id=e.period_id WHERE p.organization_id=?""", (oid,))
@@ -328,22 +410,47 @@ class Store:
                 history.setdefault(row["year"], {})[row["quarter"]] = {
                     "quarter": row["quarter"], "metrics": metrics, "expenses": expenses,
                 }
+            revision = self._year_revision(con, oid, year)
+        return organization, categories, history, settings, revision
 
+    @staticmethod
+    def _summarize(organization: dict[str, Any], y: int, categories: list[dict[str, Any]],
+                   history: dict[int, dict[int, dict[str, Any]]], settings: dict[tuple[int, int], dict[str, Any]],
+                   statuses: dict[int, str] | None = None) -> dict[str, Any]:
         selected = history.get(y, {})
-        annual = calculate_year(item["metrics"] for item in selected.values())
-        quarters = [{"quarter": q, "exists": q in selected,
-                     "metrics": selected[q]["metrics"] if q in selected else None} for q in range(1, 5)]
-        detail = []
+        effective_categories = []
         for category in categories:
-            by_quarter = [selected[q]["expenses"].get(category["id"], ZERO) if q in selected else None
-                          for q in range(1, 5)]
+            setting = settings.get((y, category["id"]))
+            if setting is None:
+                try:
+                    rate = valid_vat_rate(category["tag"])
+                except ValueError:
+                    rate = None  # Старая произвольная метка не угадывается как ставка.
+                kind = "unclassified"
+            else:
+                rate, kind = setting["vat_rate"], setting["cost_type"]
+            effective_categories.append({**category, "vat_rate": rate, "cost_type": kind})
+        classification = {cat["id"]: cat["cost_type"] for cat in effective_categories}
+        annual = calculate_year(item["metrics"] for item in selected.values())
+        quarters = []
+        for q in range(1, 5):
+            item = selected.get(q)
+            quarters.append({"quarter": q, "exists": item is not None,
+                             "state": (statuses or {}).get(q, "saved" if item else "empty"),
+                             "metrics": item["metrics"] if item else None,
+                             "analysis": period_analysis(item["metrics"], item["expenses"], classification) if item else None})
+        detail = []
+        totals_by_category: dict[int, Decimal] = {}
+        for category in effective_categories:
+            by_quarter = [selected[q]["expenses"].get(category["id"], ZERO) if q in selected else None for q in range(1, 5)]
             with localcontext() as context:
                 context.prec = 40
                 category_total = sum((n for n in by_quarter if n is not None), ZERO)
+            totals_by_category[category["id"]] = category_total
             detail.append({**category, "quarters": by_quarter, "total": category_total})
-        year_history = [{"year": history_year, "quarters": sorted(periods), "count": len(periods),
+        year_history = [{"year": hy, "quarters": sorted(periods), "count": len(periods),
                          "annual": calculate_year(item["metrics"] for item in periods.values())}
-                        for history_year, periods in sorted(history.items())]
+                        for hy, periods in sorted(history.items()) if periods]
         previous = history.get(y - 1, {})
         compare_quarters = sorted(selected)
         comparable = None
@@ -352,7 +459,202 @@ class Store:
                           "annual": calculate_year(previous[q]["metrics"] for q in compare_quarters)}
         return {"organization": organization, "year": y, "quarter_count": len(selected),
                 "quarters": quarters, "annual": annual, "expenses": detail,
+                "analysis": period_analysis(annual, totals_by_category, classification) if selected else None,
                 "history": year_history, "comparison": comparable}
+
+    def summary(self, organization_id: Any, year: Any) -> dict[str, Any]:
+        y = valid_year(year)
+        organization, categories, history, settings, revision = self._snapshot(organization_id, y)
+        result = self._summarize(organization, y, categories, history, settings)
+        result["revision"] = revision
+        return result
+
+    @staticmethod
+    def _parse_settings(raw: Any, categories: dict[int, Any]) -> dict[int, dict[str, Any]]:
+        if not isinstance(raw, dict) or len(raw) > 1000:
+            raise ValueError("Некорректные настройки статей затрат.")
+        result: dict[int, dict[str, Any]] = {}
+        for key, item in raw.items():
+            cid = valid_id(key, "Статья затрат")
+            if cid in result or cid not in categories or not isinstance(item, dict):
+                raise ValueError("Некорректная статья затрат в настройках.")
+            kind = item.get("cost_type")
+            if kind not in COST_TYPES:
+                raise ValueError("Выберите тип затрат: постоянные, переменные или не определён.")
+            result[cid] = {"cost_type": kind, "vat_rate": valid_vat_rate(item.get("vat_rate"))}
+        return result
+
+    @staticmethod
+    def _prepare_quarters(raw: Any, existing: set[int], *, allow_incomplete: bool) -> tuple[dict[int, tuple[dict[str, Decimal], dict[int, Decimal]]], dict[int, str]]:
+        if not isinstance(raw, dict) or set(raw) != {"1", "2", "3", "4"}:
+            raise ValueError("Необходимо передать все четыре квартала.")
+        prepared: dict[int, tuple[dict[str, Decimal], dict[int, Decimal]]] = {}
+        statuses: dict[int, str] = {}
+        for q in range(1, 5):
+            item = raw[str(q)]
+            if not isinstance(item, dict) or not isinstance(item.get("inputs"), dict) or not isinstance(item.get("expenses"), dict):
+                raise ValueError(f"Некорректные данные {q} квартала.")
+            inputs, expenses = item["inputs"], item["expenses"]
+            if set(inputs) - set(INPUT_FIELDS):
+                raise ValueError(f"Неизвестный показатель {q} квартала.")
+            has_value = any(value is not None and str(value).strip() != "" for value in [*inputs.values(), *expenses.values()])
+            if not has_value and q not in existing:
+                statuses[q] = "empty"
+                continue
+            missing = [INPUT_LABELS[key] for key in INPUT_FIELDS if inputs.get(key) is None or str(inputs.get(key)).strip() == ""]
+            if missing:
+                statuses[q] = "incomplete"
+                if not allow_incomplete:
+                    raise ValueError(f"{q} квартал: заполните «{missing[0]}» или введите 0. Для удаления квартала используйте отдельную кнопку.")
+                continue
+            try:
+                prepared[q] = Store._prepare_period(inputs, expenses)
+            except ValueError as exc:
+                raise ValueError(f"{q} квартал: {exc}") from exc
+            statuses[q] = "ready"
+        return prepared, statuses
+
+    def preview_year(self, organization_id: Any, year: Any, quarters: Any, raw_settings: Any) -> dict[str, Any]:
+        y = valid_year(year)
+        organization, categories, history, settings, revision = self._snapshot(organization_id, y)
+        cat_map = {c["id"]: c for c in categories}
+        parsed_settings = self._parse_settings(raw_settings, cat_map)
+        existing = set(history.get(y, {}))
+        prepared, statuses = self._prepare_quarters(quarters, existing, allow_incomplete=True)
+        for cid, setting in parsed_settings.items():
+            settings[(y, cid)] = setting
+        selected: dict[int, dict[str, Any]] = {}
+        for q, (values, expenses) in prepared.items():
+            if not set(expenses).issubset(cat_map):
+                raise ValueError("В затратах есть статья другой организации.")
+            # Если архивная статья не видна в форме, сохраняем её прежнюю сумму.
+            for cid, amount in history.get(y, {}).get(q, {}).get("expenses", {}).items():
+                if cid not in expenses and cat_map[cid]["archived"]:
+                    expenses[cid] = amount
+            selected[q] = {"quarter": q, "metrics": calculate_quarter(values, expenses.values()), "expenses": expenses}
+        history[y] = selected
+        result = self._summarize(organization, y, categories, history, settings, statuses)
+        result["revision"] = revision
+        return result
+
+    def save_year(self, organization_id: Any, year: Any, quarters: Any, raw_settings: Any,
+                  *, expected_revision: Any = None) -> dict[str, Any]:
+        y = valid_year(year)
+        with self.connection() as con:
+            con.execute("BEGIN IMMEDIATE")
+            oid = self._organization(con, organization_id)["id"]
+            self._check_revision(con, oid, y, expected_revision)
+            categories = {row["id"]: row for row in con.execute("SELECT id,archived FROM categories WHERE organization_id=?", (oid,))}
+            existing = {row[0] for row in con.execute("SELECT quarter FROM periods WHERE organization_id=? AND year=?", (oid, y))}
+            parsed_settings = self._parse_settings(raw_settings, categories)
+            prepared, _ = self._prepare_quarters(quarters, existing, allow_incomplete=False)
+            for q, (values, expenses) in prepared.items():
+                self._put_period(con, oid, y, q, values, expenses, categories)
+            con.executemany("""INSERT INTO category_year_settings(category_id,year,cost_type,vat_rate) VALUES(?,?,?,?)
+                ON CONFLICT(category_id,year) DO UPDATE SET cost_type=excluded.cost_type,vat_rate=excluded.vat_rate""",
+                [(cid, y, setting["cost_type"], setting["vat_rate"]) for cid, setting in parsed_settings.items()])
+        return self.summary(oid, y)
+
+
+    @staticmethod
+    def _map_import_categories(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[int | None]:
+        by_key = {cat["export_key"]: cat for cat in existing if cat.get("export_key")}
+        used: set[int] = set()
+        result: list[int | None] = []
+        for item in incoming:
+            key, name = item.get("export_key"), item["name"]
+            match = by_key.get(key) if key else None
+            if match and match["name"].strip().casefold() != name.strip().casefold():
+                raise ValueError(f"Статья «{name}» не совпадает с сохранённой статьёй для того же идентификатора.")
+            if not key:
+                candidates = []
+                for cat in existing:
+                    if cat["id"] in used or cat["name"].strip().casefold() != name.strip().casefold():
+                        continue
+                    try:
+                        default_rate = valid_vat_rate(cat["tag"])
+                    except ValueError:
+                        default_rate = None
+                    if default_rate == item.get("vat_rate"):
+                        candidates.append(cat)
+                if len(candidates) > 1:
+                    raise ValueError(f"Неоднозначная статья «{name}»: несколько совпадений. Используйте экспорт программы с идентификаторами.")
+                match = candidates[0] if candidates else None
+            if match:
+                if match["id"] in used:
+                    raise ValueError(f"Статья «{name}» сопоставлена дважды.")
+                used.add(match["id"])
+                result.append(match["id"])
+            else:
+                result.append(None)
+        return result
+
+    def import_plan(self, organization_id: Any, year: Any, report: dict[str, Any]) -> dict[str, Any]:
+        y = valid_year(year)
+        organization, categories, history, _, revision = self._snapshot(organization_id, y)
+        incoming = report["categories"]
+        mapping = self._map_import_categories(categories, incoming)
+        q_file = sorted(report["quarters"])
+        existing = set(history.get(y, {}))
+        metadata = report.get("metadata", {})
+        return {"organization": organization, "year": y, "sheet": report["sheet"], "metadata": metadata, "revision": revision,
+                "quarters": q_file, "existing_quarters": sorted(existing.intersection(q_file)),
+                "all_existing_quarters": sorted(existing), "category_count": len(incoming),
+                "new_categories": [item["name"] for item, cid in zip(incoming, mapping) if cid is None],
+                "unassigned_types": sum(item.get("cost_type") in (None, "unclassified") for item in incoming),
+                "unknown_rates": sum(item.get("vat_rate") is None for item in incoming)}
+
+    def import_year(self, organization_id: Any, year: Any, report: dict[str, Any], *,
+                    replace_existing: Any, apply_settings: Any, expected_revision: Any = None) -> dict[str, Any]:
+        """Импорт одного года атомарен; явный режим не перезаписывает кварталы молча."""
+        y = valid_year(year)
+        if not isinstance(replace_existing, bool) or not isinstance(apply_settings, bool):
+            raise ValueError("Укажите режим замены и применения ставок/типов затрат.")
+        with self.connection() as con:
+            con.execute("BEGIN IMMEDIATE")
+            oid = self._organization(con, organization_id)["id"]
+            self._check_revision(con, oid, y, expected_revision)
+            existing_rows = [dict(row) for row in con.execute("SELECT * FROM categories WHERE organization_id=? ORDER BY position,id", (oid,))]
+            incoming = report["categories"]
+            mapping = self._map_import_categories(existing_rows, incoming)
+            existing_quarters = {row[0] for row in con.execute("SELECT quarter FROM periods WHERE organization_id=? AND year=?", (oid, y))}
+            selected_quarters = [q for q in sorted(report["quarters"]) if replace_existing or q not in existing_quarters]
+            if not selected_quarters and not apply_settings:
+                raise ValueError("Нет новых кварталов: выберите замену существующих или применение настроек.")
+            if len(existing_rows) + sum(cid is None for cid in mapping) > 1000:
+                raise ValueError("Импорт превысит предел 1000 статей затрат.")
+            position = max((cat["position"] for cat in existing_rows), default=0)
+            for index, (item, cid) in enumerate(zip(incoming, mapping)):
+                if cid is not None:
+                    continue
+                position += 1
+                key = item.get("export_key") or f"custom:{uuid4().hex}"
+                source_row = int(key.split(":", 1)[1]) if key.startswith("source:") else None
+                cursor = con.execute("""INSERT INTO categories(organization_id,name,tag,source_row,position,export_key)
+                                        VALUES(?,?,?,?,?,?)""", (oid, item["name"], item.get("vat_rate") or "", source_row, position, key))
+                mapping[index] = cursor.lastrowid
+            categories = {row["id"]: row for row in con.execute("SELECT id,archived FROM categories WHERE organization_id=?", (oid,))}
+            imported = []
+            for q in selected_quarters:
+                item = report["quarters"][q]
+                # Явная замена квартала означает замену ВСЕХ статей, даже архивных.
+                expense_values = {cid: ZERO for cid in categories}
+                expense_values.update({int(cid): amount for cid, amount in zip(mapping, item["expenses"])})
+                self._put_period(con, oid, y, q, item["inputs"], expense_values, categories)
+                imported.append(q)
+            if apply_settings:
+                for item, cid in zip(incoming, mapping):
+                    old = con.execute("SELECT cost_type FROM category_year_settings WHERE category_id=? AND year=?", (cid, y)).fetchone()
+                    # В исходной книге типа затрат нет — прежний выбор не стираем.
+                    kind = item.get("cost_type") or (old["cost_type"] if old else "unclassified")
+                    if kind not in COST_TYPES:
+                        raise ValueError("Неизвестный тип затрат в книге.")
+                    con.execute("""INSERT INTO category_year_settings(category_id,year,cost_type,vat_rate) VALUES(?,?,?,?)
+                        ON CONFLICT(category_id,year) DO UPDATE SET cost_type=excluded.cost_type,vat_rate=excluded.vat_rate""",
+                        (cid, y, kind, valid_vat_rate(item.get("vat_rate"))))
+        return {"imported_quarters": imported, "skipped_quarters": sorted(set(report["quarters"]) - set(imported)),
+                "summary": self.summary(oid, y)}
+
 
     def backup_bytes(self) -> bytes:
         """Согласованная копия SQLite, включая неприменённый WAL."""
