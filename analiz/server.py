@@ -164,6 +164,8 @@ class AnalizHandler(BaseHTTPRequestHandler):
                 return self._json(HTTPStatus.OK, {"organizations": store.list_organizations()})
             if path == "/api/categories":
                 return self._json(HTTPStatus.OK, {"categories": store.categories(query.get("organization_id"))})
+            if path == "/api/category-impact":
+                return self._json(HTTPStatus.OK, store.category_impact(query.get("organization_id"), query.get("category_id")))
             if path == "/api/period":
                 return self._json(HTTPStatus.OK, {"period": store.get_period(query.get("organization_id"), query.get("year"), query.get("quarter"))})
             if path == "/api/summary":
@@ -286,6 +288,10 @@ class AnalizHandler(BaseHTTPRequestHandler):
                 return self._json(HTTPStatus.OK, {"ok": True})
             if path == "/api/period":
                 store.delete_period(body.get("organization_id"), body.get("year"), body.get("quarter"))
+                return self._json(HTTPStatus.OK, {"ok": True})
+            if path == "/api/categories":
+                store.delete_category(body.get("organization_id"), body.get("category_id"),
+                                      confirmed=body.get("confirmed"), expected_revision=body.get("revision"))
                 return self._json(HTTPStatus.OK, {"ok": True})
             return self._json(HTTPStatus.NOT_FOUND, {"error": "Команда не найдена."})
         self._handle_errors(run)

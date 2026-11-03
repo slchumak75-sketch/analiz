@@ -80,7 +80,7 @@ def test_api_end_to_end_csv_and_backup(running_server):
     assert status == 201
     cid = json.loads(body)["category"]["id"]
     inputs = {key: "0" for key in INPUT_FIELDS}
-    inputs.update(retail_revenue="120", input_vat="10", non_vat_deduction="2", cost_of_sales="50")
+    inputs.update(retail_revenue="120", input_vat="10", cost_of_sales="50")
     status, _, _ = request(base, "/api/period", method="POST", token=server.token, headers=origin,
                            body={"organization_id": oid, "year": 2026, "quarter": 1, "inputs": inputs,
                                  "expenses": {str(cid): "3"}})
@@ -187,3 +187,55 @@ def test_adding_category_preserves_concurrent_edit_guard(running_server):
     status, _, data = request(base, '/api/categories', method='POST', token=server.token, headers={'Origin': base}, body=body)
     assert status == 201
     assert json.loads(data)['category']['year_revision'] == server.store.summary(oid, 2026)['revision']
+
+
+def test_category_archive_restore_and_confirmed_delete_all_years(running_server):
+    server, base = running_server
+    store = server.store
+    oid = store.create_organization('Удаление')['id']
+    cid = store.add_category(oid, 'Историческая статья', '20')['id']
+    inputs = {key: '0' for key in INPUT_FIELDS}; inputs['retail_revenue'] = '120'
+    for year, value in ((2024, '5'), (2026, '7')):
+        store.save_period(oid, year, 1, inputs, {str(cid): value})
+    empty_quarters = {str(q): {'inputs': {}, 'expenses': {}} for q in range(1, 5)}
+    store.save_year(oid, 2025, empty_quarters, {str(cid): {'cost_type': 'fixed', 'vat_rate': '20'}})
+    origin = {'Origin': base}
+    archive = {'organization_id': oid, 'category_id': cid, 'archived': True}
+    assert request(base, '/api/categories', method='PATCH', token=server.token, headers=origin, body=archive)[0] == 200
+    assert store.summary(oid, 2024)['annual']['expense_total'] == 5
+    archive['archived'] = False
+    assert request(base, '/api/categories', method='PATCH', token=server.token, headers=origin, body=archive)[0] == 200
+    impact_url = '/api/category-impact?' + urlencode({'organization_id': oid, 'category_id': cid})
+    status, _, raw = request(base, impact_url, token=server.token)
+    impact = json.loads(raw)
+    assert status == 200 and impact['years'] == [2024, 2025, 2026]
+    assert impact['period_count'] == 2 and impact['settings_count'] == 1
+    delete = {'organization_id': oid, 'category_id': cid, 'confirmed': False, 'revision': impact['revision']}
+    assert request(base, '/api/categories', method='DELETE', token=server.token, headers=origin, body=delete)[0] == 400
+    store.save_period(oid, 2026, 1, inputs, {str(cid): '9'})  # другое окно после предупреждения
+    delete['confirmed'] = True
+    status, _, raw = request(base, '/api/categories', method='DELETE', token=server.token, headers=origin, body=delete)
+    assert status == 400 and 'другом окне' in json.loads(raw)['error']
+    assert store.summary(oid, 2024)['annual']['expense_total'] == 5
+    delete['revision'] = json.loads(request(base, impact_url, token=server.token)[2])['revision']
+    assert request(base, '/api/categories', method='DELETE', token=server.token, headers=origin, body=delete)[0] == 200
+    assert all(c['id'] != cid for c in store.categories(oid))
+    assert store.summary(oid, 2024)['annual']['expense_total'] == 0
+    assert store.summary(oid, 2026)['annual']['expense_total'] == 0
+
+
+def test_csv_distinguishes_missing_quarters_and_formula_errors(running_server):
+    server, base = running_server
+    oid = server.store.create_organization('Ошибки формул')['id']
+    inputs = {key: '0' for key in INPUT_FIELDS}
+    inputs.update(retail_revenue='120', non_vat_sales='12', input_vat='10')
+    server.store.save_period(oid, 2026, 2, inputs, {})
+    query = urlencode({'organization_id': oid, 'year': 2026})
+    status, _, data = request(base, '/api/report.csv?' + query, token=server.token)
+    assert status == 200
+    rows = list(csv.reader(io.StringIO(data.decode('utf-8-sig')), delimiter=';'))
+    deduction = next(row for row in rows if row and row[0] == '15')
+    adjusted = next(row for row in rows if row and row[0] == '17')
+    from decimal import Decimal
+    assert deduction[2] == '' and deduction[3] == '#ДЕЛ/0!' and Decimal(deduction[6].replace(',', '.')) == 1
+    assert adjusted[3] == '#ДЕЛ/0!' and adjusted[6] == '#ДЕЛ/0!'

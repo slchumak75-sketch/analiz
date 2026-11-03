@@ -75,7 +75,14 @@ async function waitForServer(url, child, logs) {
     assert.strictEqual(await page.locator('#context-org').innerText(), 'Тестовая организация');
     assert.strictEqual(await page.locator('.navigation').count(), 0, 'Разделы должны быть на одной странице');
     assert.strictEqual(await page.locator('[data-fill-quarter]').count(), 4);
+    assert.strictEqual(await page.locator('[data-input="non_vat_deduction"]').count(), 0, 'Строка вычета теперь расчётная');
+    assert.strictEqual(await page.locator('[data-input="retail_revenue"]').count(), 4);
     assert((await page.locator('.sheet-table thead').innerText()).includes('Итого за год'));
+    const fonts = await page.evaluate(() => ({ body: getComputedStyle(document.body).fontSize,
+      table: getComputedStyle(document.querySelector('.sheet-table td')).fontSize,
+      input: getComputedStyle(document.querySelector('.sheet-input')).fontSize,
+      heading: getComputedStyle(document.querySelector('.page-heading h1')).fontSize }));
+    assert.deepStrictEqual(fonts, { body: '28px', table: '22px', input: '22px', heading: '54px' }, 'Шрифт должен быть ровно вдвое крупнее прежнего');
 
     await page.locator('#year-input').fill('2030');
     await page.locator('#year-input').press('Tab');
@@ -83,7 +90,6 @@ async function waitForServer(url, child, logs) {
     await page.locator('[data-fill-quarter="1"]').click();
     await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('120');
     await page.locator('[data-input="input_vat"][data-quarter="1"]').fill('10');
-    await page.locator('[data-input="non_vat_deduction"][data-quarter="1"]').fill('2');
     await page.locator('[data-input="cost_of_sales"][data-quarter="1"]').fill('50');
     // Статья создаётся сразу, но черновик всех четырёх кварталов не теряется.
     await page.locator('#add-category').click();
@@ -104,6 +110,27 @@ async function waitForServer(url, child, logs) {
     await page.waitForFunction(() => document.querySelector('#q-status-1').textContent === 'сохранён');
     assert.strictEqual(await page.locator('#q-status-2').innerText(), 'нет данных');
     assert(await page.locator('#break-even-chart').isVisible(), 'График порога должен появиться');
+    await page.waitForFunction(() => document.querySelector('#expense-chart') && !document.querySelector('#expense-chart').classList.contains('hidden'));
+    assert.strictEqual((await page.locator('[data-metric="non_vat_deduction"][data-quarter="1"]').innerText()).trim(), '0,00');
+    const choice = page.locator('.expense-choice').filter({ hasText: 'Реклама — тест' });
+    assert((await choice.innerText()).includes('13,39%'), 'Доля статьи учитывает НДС и налог на прибыль, но не себестоимость');
+    assert((await page.locator('.expense-choice').filter({ hasText: 'Налог НДС' }).innerText()).includes('44,64%'));
+    assert((await page.locator('.expense-choice').filter({ hasText: 'Налог на прибыль' }).innerText()).includes('41,96%'));
+    const denominator = await page.locator('#expense-denominator').innerText();
+    assert(denominator.includes('22,40') && denominator.includes('себестоимость реализации не входит'));
+    const configuration = await page.evaluate(() => { const c = Chart.getChart(document.querySelector('#expense-chart'));
+      return { horizontal: c.options.indexAxis, duration: c.options.animation.duration, tick: c.options.scales.x.ticks.font.size, labels: c.data.labels.length }; });
+    assert.deepStrictEqual(configuration, { horizontal: 'y', duration: 1000, tick: 20, labels: 3 });
+    await page.locator('[data-expense-choice="vat"]').uncheck();
+    assert.strictEqual(await page.locator('#expense-denominator').innerText(), denominator, 'Скрытие статьи не должно менять знаменатель');
+    assert((await choice.innerText()).includes('13,39%'), 'Проценты остальных статей не пересчитываются');
+    assert.strictEqual(await page.evaluate(() => Chart.getChart(document.querySelector('#expense-chart')).data.labels.length), 2);
+    await page.locator('[data-expense-choice="vat"]').check();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForFunction(() => { const plot = document.querySelector('.expense-chart-scroll'); return plot.scrollWidth <= plot.clientWidth; });
+    assert(await page.locator('#expense-chart').isVisible(), 'График долей должен помещаться на мобильном экране');
+    assert.deepStrictEqual(await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]), [390, 390]);
+    await page.setViewportSize({ width: 1360, height: 900 });
 
     // Два окна не должны молча перезаписывать друг друга.
     const second = await page.context().newPage();
@@ -173,19 +200,62 @@ async function waitForServer(url, child, logs) {
     await page.locator('#import-dialog').waitFor({ state: 'hidden' });
     await page.waitForFunction(() => document.querySelector('[data-input="retail_revenue"][data-quarter="1"]').value === '120');
 
-    // Оригинальный шаблон тоже принимается на проверку, но в тестовую БД не загружается.
-    const original = path.resolve(__dirname, '..', 'ОТЧЕТ ПО ОРГАНИЗАЦИИ мир.xlsx');
-    await importFile({ name: path.basename(original), mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer: fs.readFileSync(original) });
-    assert((await page.locator('#import-summary').innerText()).includes('1, 2, 3'));
-    await page.locator('[data-close-dialog="import-dialog"]').first().click();
+    // Обе книги источника принимаются на проверку, но в тестовую БД не загружаются.
+    for (const filename of ['ОТЧЕТ ПО ОРГАНИЗАЦИИ мир.xlsx', 'ОТЧЕТ ПО ОРГАНИЗАЦИИ мир 2.xlsx']) {
+      const source = path.resolve(__dirname, '..', filename);
+      await importFile({ name: filename, mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer: fs.readFileSync(source) });
+      assert((await page.locator('#import-summary').innerText()).includes('1, 2, 3'));
+      await page.locator('[data-close-dialog="import-dialog"]').first().click();
+    }
+    // Архив скрывает строку, сохранение другого показателя не стирает историю.
     await categoryRow.locator('[data-archive]').click();
-    await page.waitForFunction(() => [...document.querySelectorAll('#sheet-body tr')].some((r) => r.textContent.includes('Реклама — тест') && r.textContent.includes('архив')));
+    await page.waitForFunction(() => document.querySelector('#archive-count').textContent === '1');
+    assert.strictEqual(await categoryRow.count(), 0, 'Архивная строка должна быть скрыта');
+    await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('121');
+    const saveWithArchive = page.waitForResponse((response) => response.url().endsWith('/api/year') && response.request().method() === 'POST');
+    await page.locator('#year-form button[type="submit"]').first().click();
+    assert.strictEqual((await saveWithArchive).status(), 200);
+    await page.waitForFunction(() => document.querySelector('#q-status-1').textContent === 'сохранён');
+    await page.locator('#toggle-archive').click();
+    const archived = page.locator('.archive-item').filter({ hasText: 'Реклама — тест' });
+    assert((await archived.innerText()).includes('3,00'));
+    await archived.locator('[data-archive]').click();
+    await categoryRow.waitFor({ state: 'visible' });
     assert.strictEqual(await categoryRow.locator('[data-expense][data-quarter="1"]').inputValue(), '3');
+    // Скрыть снова, затем увидеть все затронутые годы перед отдельным удалением.
+    await categoryRow.locator('[data-archive]').click();
+    await page.waitForFunction(() => document.querySelector('#archive-count').textContent === '1');
+    await archived.locator('[data-delete-category]').click();
+    await page.locator('#delete-category-dialog').waitFor({ state: 'visible' });
+    const impact = await page.locator('#delete-category-impact').innerText();
+    assert(impact.includes('2030') && impact.includes('2031'), `Должны быть перечислены все годы: ${impact}`);
+    assert(await page.locator('#delete-category-apply').isDisabled());
+    await page.locator('[data-close-dialog="delete-category-dialog"]').first().click();
+    assert.strictEqual(await page.locator('#archive-count').innerText(), '1');
+    await archived.locator('[data-delete-category]').click();
+    await page.locator('#delete-category-confirm').check();
+    await page.locator('#delete-category-apply').click();
+    await page.locator('#delete-category-dialog').waitFor({ state: 'hidden' });
+    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('#archive-count').textContent === '0');
+    assert.strictEqual(await page.locator('#archive-count').innerText(), '0');
+    assert.strictEqual(await categoryRow.count(), 0);
+
+    // Пропущенный 1-й квартал даёт Excel #ДЕЛ/0!, даже если H15 определён.
+    await page.locator('#year-input').fill('2032'); await page.locator('#year-input').press('Tab');
+    await page.waitForFunction(() => document.querySelector('#context-year').textContent.includes('2032'));
+    await page.locator('[data-fill-quarter="2"]').click();
+    await page.locator('[data-input="retail_revenue"][data-quarter="2"]').fill('120');
+    await page.locator('[data-input="non_vat_sales"][data-quarter="2"]').fill('12');
+    await page.locator('[data-input="input_vat"][data-quarter="2"]').fill('10');
+    await page.waitForFunction(() => document.querySelector('[data-metric="non_vat_deduction"][data-quarter="2"]').textContent === '#ДЕЛ/0!');
+    const note = await page.locator('#deduction-note').innerText();
+    assert(note.includes('1,00') && note.includes('#ДЕЛ/0!') && note.includes('сумма квартальных вычетов'));
+    assert((await page.locator('#expense-denominator').innerText()).includes('НДС к уплате содержит #ДЕЛ/0!'));
     await page.setViewportSize({ width: 390, height: 844 });
     const sizes = await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]);
     assert(sizes[0] <= sizes[1], `Мобильная страница переполнена: ${sizes}`);
     assert.deepStrictEqual(errors, [], `Ошибки браузера: ${errors.join('; ')}`);
-    console.log('UI smoke: одна страница, четыре квартала, аналитика, безубыточность, XLSX roundtrip/замена, CSV, backup, мобильный экран — OK.');
+    console.log('UI smoke: вычеты, шрифты 2×, выбор долей и налоги, архив/восстановление/удаление, XLSX, конкуренция и мобильный экран — OK.');
   } finally {
     if (browser) await browser.close();
     if (child.exitCode === null) {

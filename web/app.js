@@ -7,16 +7,16 @@ const state = {
   organizations: [], organizationId: null, year: new Date().getFullYear(),
   saved: null, view: null, dirty: false, saving: false, dialogMode: 'create',
   refreshId: 0, previewId: 0, previewTimer: null, importToken: null, importing: false, addingCategory: false,
-  charts: {}, toastTimer: null,
+  charts: {}, toastTimer: null, showArchive: false, deleteImpact: null, deletingCategory: false, categoryChanging: false,
+  expenseSelection: new Set(), expenseTouched: false, expenseContext: null,
 };
-const fields = ['retail_revenue', 'invoice_revenue', 'invoice_vat', 'non_vat_sales', 'non_vat_deduction', 'input_vat', 'cost_of_sales'];
 const reportRows = [
   ['4', 'Налог НДС', 'vat_due', false], ['5', 'Налог на прибыль', 'profit_tax', false],
   ['6', 'Прибыль', 'profit', false], ['7', 'Чистая прибыль', 'net_profit', false],
   ['8', 'Выручка по отчётам ККМ с НДС', 'retail_revenue', true], ['9', 'Реализация по накладным с НДС', 'invoice_revenue', true],
   ['10', 'Итого выручка', 'revenue', false], ['11', 'НДС выручки по отчётам ККМ', 'retail_vat', false],
   ['12', 'НДС реализации по накладным', 'invoice_vat', true], ['13', 'Итого НДС', 'output_vat', false],
-  ['14', 'Товары реализации без НДС', 'non_vat_sales', true], ['15', 'Вычет по товарам без НДС', 'non_vat_deduction', true],
+  ['14', 'Товары реализации без НДС', 'non_vat_sales', true], ['15', 'Вычет по товарам без НДС', 'non_vat_deduction', false],
   ['16', 'Входящий НДС', 'input_vat', true], ['17', 'Входящий НДС с вычетом', 'adjusted_input_vat', false],
   ['18', 'Себестоимость реализации без НДС', 'cost_of_sales', true], ['19', 'Себестоимость затрат без НДС', 'expense_total', false],
 ];
@@ -135,18 +135,26 @@ function renderSheet(summary, draft = null) {
     html += `<td class="calculated" data-annual="${key}">—</td></tr>`;
   }
   html += '<tr class="group-row"><th colspan="8">СТАТЬИ ЗАТРАТ БЕЗ НДС · УКАЖИТЕ ТИП ДЛЯ ТОЧКИ БЕЗУБЫТОЧНОСТИ</th></tr>';
-  for (const category of summary.expenses) {
+  for (const category of summary.expenses.filter((item) => !item.archived)) {
     const id = String(category.id), settings = draft?.settings?.[id] || { vat_rate: category.vat_rate ?? '', cost_type: category.cost_type };
-    const label = category.archived ? 'Вернуть статью из архива' : 'Перенести статью в архив';
     const source = category.source_row ? String(category.source_row) : '•';
-    html += `<tr class="${category.archived ? 'archived-row' : ''}"><td><div class="label-cell"><span class="row-code">${source}</span><span class="label-name">${esc(category.name)}</span>${category.archived ? '<span class="archived-label">архив</span>' : ''}<button class="category-action" type="button" data-archive="${id}" data-next="${category.archived ? 'false' : 'true'}" title="${label}" aria-label="${label}">${category.archived ? '↶' : '−'}</button></div></td>`;
+    html += `<tr><td><div class="label-cell"><span class="row-code">${source}</span><span class="label-name">${esc(category.name)}</span><span class="category-actions"><button class="category-action" type="button" data-archive="${id}" data-next="true" title="Скрыть статью в архив" aria-label="Скрыть статью ${esc(category.name)} в архив">Скрыть</button><button class="category-action danger-link" type="button" data-delete-category="${id}" title="Удалить статью навсегда" aria-label="Удалить статью ${esc(category.name)} навсегда">Удалить</button></span></div></td>`;
     html += `<td><input class="sheet-input rate-input" data-rate="${id}" inputmode="decimal" autocomplete="off" maxlength="12" value="${esc(settings.vat_rate ?? '')}" placeholder="—" aria-label="Ставка НДС: ${esc(category.name)}"></td>`;
     html += `<td><select class="sheet-select" data-kind="${id}" aria-label="Тип затрат: ${esc(category.name)}"><option value="unclassified" ${settings.cost_type === 'unclassified' ? 'selected' : ''}>Не определён</option><option value="fixed" ${settings.cost_type === 'fixed' ? 'selected' : ''}>Постоянные</option><option value="variable" ${settings.cost_type === 'variable' ? 'selected' : ''}>Переменные</option></select></td>`;
     for (let q = 1; q <= 4; q++) html += `<td><input class="sheet-input" data-expense="${id}" data-quarter="${q}" inputmode="decimal" autocomplete="off" maxlength="32" value="${esc(rawExpenseValue(summary, draft, q, category))}" placeholder="—" aria-label="${esc(category.name)}, ${q} квартал"></td>`;
     html += `<td class="calculated" data-category-total="${id}">—</td></tr>`;
   }
   $('#sheet-body').innerHTML = html;
+  renderArchive(summary);
 }
+function renderArchive(summary) {
+  const archived = summary.expenses.filter((item) => item.archived);
+  $('#archive-count').textContent = archived.length;
+  $('#toggle-archive').setAttribute('aria-expanded', String(state.showArchive));
+  $('#archive-panel').classList.toggle('hidden', !state.showArchive);
+  $('#archive-list').innerHTML = archived.length ? archived.map((item) => `<div class="archive-item"><div><strong>${esc(item.name)}</strong><span>За ${summary.year} год: ${summary.quarter_count ? esc(money(item.total, true)) : 'нет данных'}</span></div><div class="archive-actions"><button type="button" class="button button-light" data-archive="${item.id}" data-next="false">Восстановить</button><button type="button" class="button button-danger-quiet" data-delete-category="${item.id}">Удалить навсегда</button></div></div>`).join('') : '<p>Скрытых статей пока нет.</p>';
+}
+
 function collect() {
   const quarters = {}, settings = {};
   for (let q = 1; q <= 4; q++) quarters[String(q)] = { inputs: {}, expenses: {} };
@@ -166,7 +174,7 @@ function schedulePreview() {
       const view = await api('/api/year/preview', { method: 'POST', body: collect() });
       if (serial !== state.previewId) return;
       state.view = view; renderResults(view);
-      $('#preview-status').textContent = view.quarters.some((q) => q.state === 'incomplete') ? 'Для нового квартала заполните все 7 основных показателей.' : state.dirty ? 'Расчёт обновлён. Сохраните изменения.' : 'Данные на вашем компьютере';
+      $('#preview-status').textContent = view.quarters.some((q) => q.state === 'incomplete') ? 'Для нового квартала заполните все 6 основных показателей.' : state.dirty ? 'Расчёт обновлён. Сохраните изменения.' : 'Данные на вашем компьютере';
     } catch (error) {
       if (serial !== state.previewId) return;
       $('#preview-status').textContent = error.message; $('#preview-status').classList.add('error');
@@ -176,12 +184,14 @@ function schedulePreview() {
 function updateSheetValues(s) {
   $$('[data-metric]').forEach((cell) => {
     const q = s.quarters[Number(cell.dataset.quarter) - 1];
-    cell.textContent = q.exists ? money(q.metrics[cell.dataset.metric]) : '—';
+    const key = cell.dataset.metric, value = q.metrics?.[key];
+    cell.textContent = !q.exists ? '—' : (value === null && ['vat_due', 'non_vat_deduction', 'adjusted_input_vat'].includes(key) ? '#ДЕЛ/0!' : money(value));
+    cell.title = key === 'non_vat_deduction' && q.legacy_manual_deduction !== null ? `Ранее вручную введено: ${money(q.legacy_manual_deduction)}. Сейчас действует формула новой книги.` : '';
     cell.classList.toggle('muted-cell', !q.exists);
   });
   $$('[data-annual]').forEach((cell) => {
     const key = cell.dataset.annual;
-    cell.textContent = !s.quarter_count ? '—' : (key === 'non_vat_deduction' && s.annual[key] === null ? '#ДЕЛ/0!' : money(s.annual[key]));
+    cell.textContent = !s.quarter_count ? '—' : (['vat_due', 'non_vat_deduction', 'adjusted_input_vat'].includes(key) && s.annual[key] === null ? '#ДЕЛ/0!' : money(s.annual[key]));
   });
   const byId = Object.fromEntries(s.expenses.map((expense) => [String(expense.id), expense]));
   $$('[data-category-total]').forEach((cell) => { cell.textContent = s.quarter_count ? money(byId[cell.dataset.categoryTotal]?.total) : '—'; });
@@ -192,9 +202,18 @@ function updateSheetValues(s) {
     $(`[data-delete-quarter="${q}"]`).disabled = !wasSaved;
   }
   const note = $('#deduction-note');
-  if (!s.quarter_count) note.innerHTML = '<strong>Годовой вычет:</strong> H15 считается отдельно по формуле H14 / H10 × H16. Квартальные вычеты вводятся вручную.';
-  else if (s.annual.non_vat_deduction === null) note.innerHTML = '<strong>Годовой вычет H15 не определён (#ДЕЛ/0!):</strong> выручка равна нулю. H17 остаётся суммой квартальных значений.';
-  else note.innerHTML = `<strong>Формула исходной книги:</strong> H15 = H14 / H10 × H16: <strong>${esc(money(s.annual.non_vat_deduction))}</strong>; сумма квартальных вычетов: <strong>${esc(money(s.annual.quarterly_deduction_sum))}</strong>; разница: <strong>${esc(fixed(s.annual.deduction_difference, 8, true))}</strong>. H17 — сумма квартальных значений.`;
+  if (!s.quarter_count) {
+    note.innerHTML = '<strong>Вычет:</strong> квартальные значения рассчитываются последовательно с начала года; H15 = H14 / H10 × H16.';
+  } else {
+    const annual = s.annual.non_vat_deduction === null ? '#ДЕЛ/0!' : money(s.annual.non_vat_deduction);
+    const quarterly = s.annual.quarterly_deduction_sum === null ? '#ДЕЛ/0!' : money(s.annual.quarterly_deduction_sum);
+    const difference = s.annual.deduction_difference === null ? 'не определена' : fixed(s.annual.deduction_difference, 8, true);
+    note.innerHTML = `<strong>Вычет по формуле H15:</strong> ${esc(annual)}; <strong>сумма квартальных вычетов:</strong> ${esc(quarterly)}; <strong>разница:</strong> ${esc(difference)}. H17 — сумма квартальных значений.`;
+    if (s.annual.non_vat_deduction === null || s.annual.quarterly_deduction_sum === null) note.innerHTML += ' Ошибка #ДЕЛ/0! означает нулевую годовую или накопленную выручку; она распространяется на зависимые формулы, как в Excel. Пустые кварталы в формулах считаются нулями.';
+  }
+  const legacy = s.quarters.filter((q) => q.legacy_manual_deduction !== null);
+  if (legacy.length) note.innerHTML += `<details class="legacy-deductions"><summary>Прежние ручные вычеты (не используются в расчётах)</summary><p>${legacy.map((q) => `${q.quarter} кв.: ${esc(money(q.legacy_manual_deduction))}`).join(' · ')}</p></details>`;
+
 }
 function changeBadge(key, current, comparable) {
   if (!comparable) return '<span>Нет сравнимых кварталов прошлого года</span>';
@@ -257,6 +276,7 @@ function renderAnalysisTable(s) {
   $('#analysis-year').textContent = String(s.year);
   const rows = [
     ['Выручка без НДС', 'metrics', 'revenue_without_vat', false], ['Себестоимость и затраты', 'metrics', 'total_costs', false],
+    ['Статьи затрат + НДС + налог на прибыль · без себестоимости', 'metrics', 'expense_tax_total', false],
     ['Постоянные затраты', 'analysis', 'fixed_costs', false], ['Переменные затраты', 'analysis', 'variable_costs', false],
     ['Маржинальный доход', 'analysis', 'contribution', false], ['Маржинальность, %', 'analysis', 'contribution_margin', true],
     ['Точка безубыточности · без НДС', 'analysis', 'break_even_revenue', false], ['Запас прочности', 'analysis', 'safety_amount', false],
@@ -264,19 +284,19 @@ function renderAnalysisTable(s) {
     ['Чистая рентабельность, %', 'metrics', 'net_margin', true],
   ];
   $('#analysis-body').innerHTML = rows.map(([label, group, key, percent]) => {
-    const format = (value) => value === null ? '—' : `${fixed(value)}${percent ? '%' : ''}`;
-    const cells = s.quarters.map((q) => `<td>${esc(format(analysisValue(group === 'analysis' ? q.analysis : q.metrics, group, key)))}</td>`).join('');
+    const format = (value, exists) => value === null ? (key === 'expense_tax_total' && exists ? '#ДЕЛ/0!' : '—') : `${fixed(value)}${percent ? '%' : ''}`;
+    const cells = s.quarters.map((q) => `<td>${esc(format(analysisValue(group === 'analysis' ? q.analysis : q.metrics, group, key), q.exists))}</td>`).join('');
     const total = analysisValue(group === 'analysis' ? s.analysis : (s.quarter_count ? s.annual : null), group, key);
-    return `<tr class="${key === 'break_even_revenue' ? 'analysis-emphasis' : ''}"><td>${esc(label)}</td>${cells}<td>${esc(format(total))}</td></tr>`;
+    return `<tr class="${key === 'break_even_revenue' ? 'analysis-emphasis' : ''}"><td>${esc(label)}</td>${cells}<td>${esc(format(total, s.quarter_count > 0))}</td></tr>`;
   }).join('') + `<tr><td>Состояние расчёта порога</td>${s.quarters.map((q) => `<td>${esc(q.analysis ? statusLabels[q.analysis.break_even_status] : '—')}</td>`).join('')}<td>${esc(s.analysis ? statusLabels[s.analysis.break_even_status] : '—')}</td></tr>`;
 }
-const COLORS = { green: '#1d8464', light: '#b9d9bb', yellow: '#d8bd72', grid: '#f0f3f0', red: '#cf8775', blue: '#83b8ad' };
+const COLORS = { green: '#176e50', light: '#70a58b', yellow: '#a87808', grid: '#dce7df', red: '#b0443d', blue: '#367c76' };
 function chartOptions() {
   return { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
-    plugins: { legend: { position: 'bottom', align: 'start', labels: { boxWidth: 9, boxHeight: 9, padding: 17, color: '#83958a', font: { size: 10, family: 'Segoe UI, Arial' }, usePointStyle: true, pointStyle: 'circle' } },
-      tooltip: { backgroundColor: '#284c3c', padding: 10, cornerRadius: 7, callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${money(ctx.dataset.original?.[ctx.dataIndex] ?? ctx.raw, true)}` } } },
-    scales: { x: { grid: { display: false }, border: { display: false }, ticks: { color: '#a2b0a6', font: { size: 10 } } },
-      y: { grid: { color: COLORS.grid }, border: { display: false }, ticks: { color: '#a2b0a6', font: { size: 10 }, maxTicksLimit: 5, callback: (value) => compact(value) } } } };
+    plugins: { legend: { position: 'bottom', align: 'start', labels: { boxWidth: 9, boxHeight: 9, padding: 17, color: '#345246', font: { size: 20, family: 'Segoe UI, Arial' }, usePointStyle: true, pointStyle: 'circle' } },
+      tooltip: { backgroundColor: '#284c3c', padding: 14, cornerRadius: 7, titleFont: { size: 24 }, bodyFont: { size: 24 }, callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${money(ctx.dataset.original?.[ctx.dataIndex] ?? ctx.raw, true)}` } } },
+    scales: { x: { grid: { display: false }, border: { display: false }, ticks: { color: '#435f51', font: { size: 20 } } },
+      y: { grid: { color: COLORS.grid }, border: { display: false }, ticks: { color: '#435f51', font: { size: 20 }, maxTicksLimit: 5, callback: (value) => compact(value) } } } };
 }
 function dataset(label, original, color, extra = {}) { return { label, original, data: original.map(n), backgroundColor: color, borderColor: color, borderRadius: 4, maxBarThickness: 30, ...extra }; }
 function plot(id, config, hasData) {
@@ -286,6 +306,95 @@ function plot(id, config, hasData) {
   if (!hasData) return;
   if (typeof Chart === 'undefined') { empty.textContent = 'Не удалось загрузить график.'; empty.classList.remove('hidden'); return; }
   state.charts[id] = new Chart(canvas, config);
+}
+function expenseKey(item) { return item.kind === 'category' ? `category:${item.category_id}` : item.kind; }
+function expenseLabel(item) {
+  const rate = item.kind === 'category' && item.vat_rate !== null ? ` · НДС ${item.vat_rate}%` : '';
+  return `${item.name}${rate}${item.archived ? ' · архив' : ''}`;
+}
+function expenseSorted(s) {
+  return [...s.expense_structure.items].sort((a, b) => Math.abs(n(b.amount) || 0) - Math.abs(n(a.amount) || 0));
+}
+const expenseValueLabels = {
+  id: 'expenseValueLabels',
+  afterDatasetsDraw(chart) {
+    const { ctx, chartArea } = chart, values = chart.data.datasets[0].data;
+    ctx.save(); ctx.fillStyle = '#214c3b'; ctx.font = '600 20px "Segoe UI", Arial'; ctx.textBaseline = 'middle';
+    chart.getDatasetMeta(0).data.forEach((bar, index) => {
+      const value = values[index]; if (value === null || !Number.isFinite(value)) return;
+      const label = `${fixed(value)}%`, width = ctx.measureText(label).width;
+      const desired = value < 0 ? bar.x - width - 8 : bar.x + 8;
+      const x = Math.max(chartArea.left, Math.min(desired, chart.width - width - 5));
+      ctx.fillText(label, x, bar.y);
+    });
+    ctx.restore();
+  },
+};
+function renderExpenseChart(s) {
+  const context = `${s.organization.id}:${s.year}`;
+  if (state.expenseContext !== context) { state.expenseContext = context; state.expenseTouched = false; state.expenseSelection.clear(); }
+  const items = expenseSorted(s);
+  if (!state.expenseTouched) {
+    // По умолчанию не более десяти крупных статей плюс оба налога с ненулевым значением.
+    const defaults = items.filter((item) => n(item.amount) !== 0 && item.kind === 'category').slice(0, 10);
+    defaults.push(...items.filter((item) => item.kind !== 'category' && item.amount !== null && n(item.amount) !== 0));
+    state.expenseSelection = new Set(defaults.map(expenseKey));
+  }
+  $('#expense-choices').innerHTML = items.map((item) => {
+    const key = expenseKey(item), checked = state.expenseSelection.has(key) ? 'checked' : '';
+    const amount = !s.quarter_count ? 'нет данных' : item.amount === null ? '#ДЕЛ/0!' : money(item.amount, true);
+    const share = item.share_percent === null ? 'доля не определена' : `${fixed(item.share_percent)}%`;
+    return `<label class="expense-choice"><input type="checkbox" data-expense-choice="${esc(key)}" ${checked}><span><strong>${esc(expenseLabel(item))}</strong><small>${esc(amount)} · ${esc(share)}</small></span></label>`;
+  }).join('');
+  const structure = s.expense_structure;
+  let message = 'Знаменатель: все статьи затрат + НДС к уплате + налог на прибыль; себестоимость реализации не входит. Выбор флажков только скрывает столбцы, знаменатель и проценты остальных статей не меняются. Архивные суммы сохраняются. Из-за округления показанные доли могут в сумме немного отличаться от 100%.';
+  if (structure.status === 'ready') message = `Общая сумма для долей: ${money(structure.total, true)}; ` + message;
+  else if (structure.status === 'vat_undefined') message = 'Доли не определены: НДС к уплате содержит #ДЕЛ/0!. ' + message;
+  else if (structure.status === 'nonpositive_total') message = `Доли не определены: общая сумма ${money(structure.total, true)} не положительна. ` + message;
+  else message = 'Нет сохранённых или заполненных кварталов. ' + message;
+  $('#expense-denominator').textContent = message;
+  updateExpensePlot(s);
+}
+function updateExpensePlot(s) {
+  const structure = s.expense_structure;
+  const chosen = expenseSorted(s).filter((item) => state.expenseSelection.has(expenseKey(item)) && item.amount !== null && n(item.amount) !== 0);
+  const canPlot = structure.status === 'ready' && chosen.length > 0;
+  const canvas = $('#expense-chart'), empty = $('#expense-chart-empty'), area = $('#expense-plot-area');
+  if (!canPlot) {
+    if (state.charts['expense-chart']) { state.charts['expense-chart'].destroy(); delete state.charts['expense-chart']; }
+    canvas.classList.add('hidden'); empty.classList.remove('hidden'); area.style.height = '320px';
+    empty.textContent = structure.status === 'vat_undefined' ? 'НДС не определён (#ДЕЛ/0!), поэтому доли не рассчитываются.' : structure.status === 'nonpositive_total' ? 'Общая сумма для долей не положительна.' : structure.status === 'no_data' ? 'Введите данные, чтобы увидеть структуру.' : 'Выберите хотя бы одну ненулевую статью или налог.';
+    return;
+  }
+  if (typeof Chart === 'undefined') { canvas.classList.add('hidden'); empty.classList.remove('hidden'); empty.textContent = 'Не удалось загрузить график.'; return; }
+  canvas.classList.remove('hidden'); empty.classList.add('hidden');
+  // Область с прокруткой не растягивает страницу при большом числе статей.
+  area.style.height = `${Math.min(30000, Math.max(320, chosen.length * 55 + 90))}px`;
+  const labels = chosen.map((item) => {
+    const suffix = item.kind === 'category' && item.vat_rate !== null ? ` · ${item.vat_rate}%` : '';
+    const maxLabel = window.innerWidth <= 760 ? 10 : 25;
+    const maxName = Math.max(4, maxLabel - suffix.length), name = item.name.length > maxName ? `${item.name.slice(0, maxName - 1)}…` : item.name;
+    return `${name}${suffix}`;
+  });
+  const amounts = chosen.map((item) => item.amount), shares = chosen.map((item) => n(item.share_percent));
+  const data = dataset('Доля в общей сумме', amounts, COLORS.green, {
+    data: shares, names: chosen.map(expenseLabel),
+    backgroundColor: chosen.map((item) => n(item.amount) < 0 ? COLORS.red : COLORS.green), maxBarThickness: 29,
+  });
+  if (state.charts['expense-chart']) {
+    const chart = state.charts['expense-chart']; chart.data.labels = labels; chart.data.datasets = [data]; chart.resize(); chart.update(); return;
+  }
+  const options = chartOptions(); options.indexAxis = 'y'; options.plugins.legend.display = false;
+  // Та же длительность и easing, что у стандартной анимации графика чистой прибыли Chart.js.
+  options.animation = { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1000, easing: 'easeOutQuart' };
+  options.interaction = { mode: 'nearest', intersect: true };
+  options.layout = { padding: { right: 80 } };
+  options.plugins.tooltip.callbacks.label = (ctx) => ` ${ctx.dataset.names[ctx.dataIndex]}: ${fixed(ctx.raw)}% · ${money(ctx.dataset.original[ctx.dataIndex], true)}`;
+  options.scales = {
+    x: { grid: { color: COLORS.grid }, border: { display: false }, ticks: { color: '#435f51', font: { size: 20 }, maxTicksLimit: 5, callback: (value) => `${fixed(value, 0)}%` } },
+    y: { grid: { display: false }, border: { display: false }, ticks: { color: '#345246', font: { size: 20 }, autoSkip: false } },
+  };
+  state.charts['expense-chart'] = new Chart(canvas, { type: 'bar', data: { labels, datasets: [data] }, options, plugins: [expenseValueLabels] });
 }
 function renderCharts(s) {
   const qValues = (key, group = 'metrics') => s.quarters.map((q) => q[group]?.[key] ?? null);
@@ -298,12 +407,7 @@ function renderCharts(s) {
   plot('break-even-chart', { type: 'bar', data: { labels, datasets: [
     dataset('Выручка без НДС', qValues('revenue_without_vat'), COLORS.green), dataset('Точка безубыточности', breakValues, COLORS.yellow),
   ] }, options: chartOptions() }, breakValues.some((value) => value !== null));
-  const costs = s.expenses.filter((item) => n(item.total) !== 0).sort((a, b) => Math.abs(n(b.total)) - Math.abs(n(a.total))).slice(0, 10);
-  const options = chartOptions(); options.indexAxis = 'y'; options.plugins.legend.display = false;
-  options.interaction = { mode: 'nearest', intersect: true };
-  options.scales = { x: { grid: { color: COLORS.grid }, border: { display: false }, ticks: { color: '#a2b0a6', font: { size: 10 }, maxTicksLimit: 4, callback: (value) => compact(value) } }, y: { grid: { display: false }, border: { display: false }, ticks: { color: '#7c9082', font: { size: 10 }, autoSkip: false } } };
-  const originals = costs.map((item) => item.total);
-  plot('expense-chart', { type: 'bar', data: { labels: costs.map((item) => item.name + (item.vat_rate !== null ? ` · ${item.vat_rate}%` : '')), datasets: [dataset('Затраты', originals, COLORS.green, { backgroundColor: originals.map((v) => n(v) < 0 ? COLORS.red : COLORS.green), maxBarThickness: 17 })] }, options }, costs.length > 0);
+  renderExpenseChart(s);
   const history = s.history, values = (key) => history.map((item) => item.annual[key]);
   const line = (label, key, color) => dataset(label, values(key), color, { borderWidth: 2, pointRadius: 4, tension: .2, fill: false });
   plot('history-chart', { type: 'line', data: { labels: history.map((item) => `${item.year}${item.count < 4 ? ` · ${item.count}/4` : ''}`), datasets: [line('Выручка с НДС', 'revenue', COLORS.green), line('Затраты', 'total_costs', COLORS.blue), line('Чистая прибыль', 'net_profit', COLORS.yellow)] }, options: chartOptions() }, history.length > 0);
@@ -340,7 +444,8 @@ async function previewFile(file) {
   const metaText = metadata.year || metadata.organization || metadata.currency ? `<br>В файле: <strong>${esc(metadata.organization || 'организация не указана')}</strong>, ${esc(metadata.year || 'год не указан')}, валюта: ${esc(metadata.currency || 'не указана')}.` : '<br>В исходном файле организация, год и валюта не указаны.';
   const additions = plan.new_categories.length ? `<br>Новых статей: <strong>${plan.new_categories.length}</strong> (${esc(plan.new_categories.slice(0, 4).join(', '))}${plan.new_categories.length > 4 ? '…' : ''}).` : '<br>Новых статей не требуется.';
   const warning = mismatchYear || mismatchOrg || mismatchCurrency ? '<span class="warning">Организация, год или валюта файла отличаются от выбранных. Проверьте назначение перед загрузкой.</span>' : '';
-  $('#import-summary').innerHTML = `<strong>${esc(file.name)}</strong><br>Назначение: <strong>${esc(plan.organization.name)} · ${plan.year}</strong>, валюта: ${esc(plan.organization.currency || 'не указана')}.<br>В файле заполнены кварталы: <strong>${esc(plan.quarters.join(', '))}</strong>.${metaText}${additions}<br>Конвертация валют не выполняется.${warning}`;
+  const legacy = plan.legacy_deductions ? `<br>В файле прежние ручные вычеты: ${plan.legacy_deductions} квартал(а). Для загружаемых кварталов они сохраняются справочно, если прежний вычет ещё не был сохранён; в расчёте действует новая формула.` : '';
+  $('#import-summary').innerHTML = `<strong>${esc(file.name)}</strong><br>Назначение: <strong>${esc(plan.organization.name)} · ${plan.year}</strong>, валюта: ${esc(plan.organization.currency || 'не указана')}.<br>В файле заполнены кварталы: <strong>${esc(plan.quarters.join(', '))}</strong>.${metaText}${additions}${legacy}<br>Конвертация валют не выполняется.${warning}`;
   $('#import-conflicts').classList.toggle('hidden', !plan.existing_quarters.length);
   $('#import-conflicts input[value="skip"]').checked = true;
   $('#import-settings').checked = plan.all_existing_quarters.length === 0;
@@ -349,6 +454,27 @@ async function previewFile(file) {
   $('#import-dialog').showModal();
 }
 
+async function openCategoryDeletion(id) {
+  if (!requireSaved()) return;
+  const organizationId = state.organizationId, year = state.year, revision = state.saved?.revision;
+  const query = new URLSearchParams({ organization_id: organizationId, category_id: id });
+  const impact = await api(`/api/category-impact?${query}`);
+  if (state.organizationId !== organizationId || state.year !== year || state.dirty || state.saved?.revision !== revision) throw new Error('Данные изменились. Проверьте удаление ещё раз.');
+  state.deleteImpact = { ...impact, organizationId, year };
+  const years = impact.years.length ? impact.years.join(', ') : 'нет сохранённых сумм или настроек';
+  $('#delete-category-impact').innerHTML = `<strong>${esc(impact.category.name)}</strong><p>Затронутые годы: <strong>${esc(years)}</strong>.</p><p>Будут удалены суммы в ${impact.period_count} квартал(ах) и настройки за ${impact.settings_count} год(а). Итоги и налоги этих лет могут измениться. Действие необратимо без резервной копии.</p>`;
+  $('#delete-category-confirm').checked = false; $('#delete-category-apply').disabled = true;
+  $('#delete-category-dialog').showModal();
+}
+async function changeCategoryArchive(id, archived) {
+  if (!requireSaved() || state.categoryChanging) return;
+  if (!window.confirm(archived ? 'Перенести статью в архив? Прошлые суммы сохранятся.' : 'Вернуть статью из архива?')) return;
+  state.categoryChanging = true; $('#application').inert = true;
+  try {
+    await api('/api/categories', { method: 'PATCH', body: { organization_id: state.organizationId, category_id: id, archived } });
+    await refresh(); toast(archived ? 'Статья скрыта в архиве; история сохранена.' : 'Статья восстановлена.');
+  } finally { state.categoryChanging = false; $('#application').inert = false; }
+}
 document.addEventListener('click', (event) => {
   const close = event.target.closest('[data-close-dialog]'); if (close) { $(`#${close.dataset.closeDialog}`).close(); return; }
   const fill = event.target.closest('[data-fill-quarter]');
@@ -364,13 +490,40 @@ document.addEventListener('click', (event) => {
     api('/api/period', { method: 'DELETE', body: { organization_id: state.organizationId, year: state.year, quarter: q } }).then(() => refresh()).then(() => toast('Квартал удалён.')).catch(fail); return;
   }
   const archive = event.target.closest('[data-archive]');
-  if (archive) {
-    if (!requireSaved()) return;
-    const archived = archive.dataset.next === 'true';
-    if (!window.confirm(archived ? 'Перенести статью в архив? Прошлые суммы сохранятся.' : 'Вернуть статью из архива?')) return;
-    api('/api/categories', { method: 'PATCH', body: { organization_id: state.organizationId, category_id: Number(archive.dataset.archive), archived } }).then(() => refresh()).then(() => toast(archived ? 'Статья перенесена в архив.' : 'Статья восстановлена.')).catch(fail);
-  }
+  if (archive) { changeCategoryArchive(Number(archive.dataset.archive), archive.dataset.next === 'true').catch(fail); return; }
+  const deleteCategory = event.target.closest('[data-delete-category]');
+  if (deleteCategory) { openCategoryDeletion(Number(deleteCategory.dataset.deleteCategory)).catch(fail); }
 });
+$('#toggle-archive').addEventListener('click', () => { state.showArchive = !state.showArchive; if (state.saved) renderArchive(state.saved); });
+$('#delete-category-confirm').addEventListener('change', () => { $('#delete-category-apply').disabled = !$('#delete-category-confirm').checked; });
+$('#delete-category-dialog').addEventListener('cancel', (event) => { if (state.deletingCategory) event.preventDefault(); });
+$('#delete-category-form').addEventListener('submit', async (event) => {
+  event.preventDefault(); if (!state.deleteImpact || !$('#delete-category-confirm').checked || state.deletingCategory) return;
+  const impact = state.deleteImpact;
+  if (state.organizationId !== impact.organizationId || state.year !== impact.year || !requireSaved()) { toast('Данные изменились. Проверьте удаление ещё раз.', true); return; }
+  state.deletingCategory = true; $('#application').inert = true; $('#delete-category-form').inert = true;
+  try {
+    await api('/api/categories', { method: 'DELETE', body: { organization_id: impact.organizationId, category_id: impact.category.id, confirmed: true, revision: impact.revision } });
+    $('#delete-category-dialog').close(); state.deleteImpact = null; await refresh(); toast('Статья и её история удалены.');
+  } catch (error) { fail(error); }
+  finally { state.deletingCategory = false; $('#application').inert = false; $('#delete-category-form').inert = false; }
+});
+$('#expense-choices').addEventListener('change', (event) => {
+  const input = event.target.closest('[data-expense-choice]'); if (!input || !state.view) return;
+  state.expenseTouched = true;
+  if (input.checked) state.expenseSelection.add(input.dataset.expenseChoice); else state.expenseSelection.delete(input.dataset.expenseChoice);
+  updateExpensePlot(state.view);
+});
+function selectExpenseChoices(selectAll) {
+  if (!state.view) return;
+  state.expenseTouched = true; state.expenseSelection.clear();
+  if (selectAll) state.view.expense_structure.items.forEach((item) => state.expenseSelection.add(expenseKey(item)));
+  $$('[data-expense-choice]').forEach((input) => { input.checked = selectAll; });
+  updateExpensePlot(state.view);
+}
+$('#expense-select-all').addEventListener('click', () => selectExpenseChoices(true));
+$('#expense-select-none').addEventListener('click', () => selectExpenseChoices(false));
+window.addEventListener('resize', () => { if (state.view && state.charts['expense-chart']) updateExpensePlot(state.view); });
 $('#onboarding-create').addEventListener('click', () => openOrganization('create'));
 $('#add-organization').addEventListener('click', () => openOrganization('create'));
 $('#manage-organization').addEventListener('click', () => openOrganization('edit'));

@@ -23,9 +23,12 @@ MAX_UNCOMPRESSED = 80 * 1024 * 1024
 MAX_ENTRIES = 1500
 MAX_ROWS = 1020
 META_SHEET = "__ANALIZ_META__"
-SIGNATURE = "ANALIZ_XLSX_V2"
+SIGNATURE = "ANALIZ_XLSX_V3"
+SUPPORTED_SIGNATURES = {"ANALIZ_XLSX_V2", SIGNATURE}
 INPUT_ROWS = {"retail_revenue": 8, "invoice_revenue": 9, "invoice_vat": 12,
-              "non_vat_sales": 14, "non_vat_deduction": 15, "input_vat": 16, "cost_of_sales": 18}
+              "non_vat_sales": 14, "input_vat": 16, "cost_of_sales": 18}
+DEDUCTION_FORMULAS = ("=D16/D10*D14", "=(D16+E16)/(D10+E10)*(D14+E14)-D15",
+                      "=(D16+E16+F16)/(D10+E10+F10)*(D14+E14+F14)-D15-E15", "=H15-F15-E15-D15")
 TYPE_LABEL = {"fixed": "Постоянные", "variable": "Переменные", "unclassified": "Не определено"}
 TYPE_PARSE = {v.casefold(): k for k, v in TYPE_LABEL.items()}
 TYPE_PARSE.update({"fixed": "fixed", "variable": "variable", "unclassified": "unclassified"})
@@ -104,7 +107,7 @@ def make_report(summary: dict[str, Any]) -> bytes:
         formulas = {4: f"={col}13-{col}17", 5: f"=({col}10-{col}13-{col}18-{col}19)*0.2",
                     6: f"={col}10-{col}13-{col}18-{col}19", 7: f"={col}6-{col}5",
                     10: f"={col}8+{col}9", 11: f"={col}13-{col}12",
-                    13: f"={col}10-{col}14-({col}10-{col}14)/1.2",
+                    13: f"={col}10-{col}14-({col}10-{col}14)/1.2", 15: DEDUCTION_FORMULAS[q],
                     17: f"={col}16-{col}15", 19: f"=SUM({col}20:{col}{expense_end})"}
         for row, formula in formulas.items():
             ws[f"{col}{row}"] = formula
@@ -154,7 +157,9 @@ def make_report(summary: dict[str, Any]) -> bytes:
         analysis.cell(5, col).font = Font(bold=True, color="FFFFFF")
     metrics = [
         ("Выручка с НДС", "metrics", "revenue"), ("Выручка без НДС", "metrics", "revenue_without_vat"),
-        ("Себестоимость и затраты", "metrics", "total_costs"), ("Прибыль", "metrics", "profit"),
+        ("Себестоимость и затраты", "metrics", "total_costs"),
+        ("Статьи затрат + НДС + налог на прибыль (без себестоимости реализации)", "metrics", "expense_tax_total"),
+        ("Прибыль", "metrics", "profit"),
         ("Чистая прибыль", "metrics", "net_profit"), ("Чистая рентабельность, %", "metrics", "net_margin"),
         ("Постоянные затраты", "analysis", "fixed_costs"), ("Переменные затраты", "analysis", "variable_costs"),
         ("Маржинальный доход", "analysis", "contribution"), ("Маржинальность, %", "analysis", "contribution_margin"),
@@ -172,6 +177,8 @@ def make_report(summary: dict[str, Any]) -> bytes:
                 value = None  # частичные суммы не выдаём за классифицированные целиком
             if group == "status":
                 text_cell(analysis.cell(row, q + 2), STATUS_LABEL.get(value, "Нет данных"))
+            elif key == "expense_tax_total" and value is None and quarter["exists"]:
+                text_cell(analysis.cell(row, q + 2), "#ДЕЛ/0!")
             else:
                 write_number(analysis.cell(row, q + 2), value)
         obj = summary.get("analysis") if group in ("analysis", "status") else summary.get("annual")
@@ -180,6 +187,8 @@ def make_report(summary: dict[str, Any]) -> bytes:
             value = None
         if group == "status":
             text_cell(analysis.cell(row, 6), STATUS_LABEL.get(value, "Нет данных"))
+        elif key == "expense_tax_total" and value is None and summary["quarter_count"]:
+            text_cell(analysis.cell(row, 6), "#ДЕЛ/0!")
         else:
             write_number(analysis.cell(row, 6), value)
         if row % 2 == 0:
@@ -207,14 +216,39 @@ def make_report(summary: dict[str, Any]) -> bytes:
         chart.set_categories(Reference(analysis, min_col=2, max_col=5, min_row=5))
         analysis.add_chart(chart, anchor)
 
-    make_chart("Выручка, затраты и чистая прибыль", [6, 8, 10], "A25")
-    make_chart("Выручка без НДС и точка безубыточности", [7, 16], "J25")
+    make_chart("Выручка, затраты и чистая прибыль", [6, 8, 11], "A25")
+    make_chart("Выручка без НДС и точка безубыточности", [7, 17], "J25")
+
+    structure = summary["expense_structure"]
+    text_cell(analysis["A49"], "Структура: все статьи + НДС к уплате + налог на прибыль; без себестоимости реализации")
+    analysis.merge_cells("A49:F49")
+    text_cell(analysis["A50"], "Статья / налог")
+    text_cell(analysis["B50"], "Сумма")
+    text_cell(analysis["C50"], "Доля, %")
+    text_cell(analysis["D50"], "Все статьи и налоги — общий знаменатель")
+    for row, item in enumerate(structure["items"], start=51):
+        text_cell(analysis.cell(row, 1), item["name"] + (" (архив)" if item.get("archived") else ""))
+        if item["amount"] is None:
+            text_cell(analysis.cell(row, 2), "#ДЕЛ/0!")
+        else:
+            write_number(analysis.cell(row, 2), item["amount"])
+        write_number(analysis.cell(row, 3), item["share_percent"])
+    end = 51 + len(structure["items"])
+    text_cell(analysis.cell(end, 1), "Общая сумма для долей")
+    if structure["total"] is None and summary["quarter_count"]:
+        text_cell(analysis.cell(end, 2), "#ДЕЛ/0!")
+    else:
+        write_number(analysis.cell(end, 2), structure["total"])
 
     meta = wb.create_sheet(META_SHEET)
     meta.sheet_state = "hidden"
     for coord, value in {"A1": SIGNATURE, "A2": "organization", "B2": summary["organization"]["name"],
                          "A3": "year", "B3": str(summary["year"]), "A4": "currency", "B4": summary["organization"]["currency"]}.items():
         text_cell(meta[coord], value)
+    for q, period in enumerate(summary["quarters"], start=1):
+        text_cell(meta.cell(1, 6 + q), f"q{q}_legacy_manual_deduction")
+        if period.get("legacy_manual_deduction") is not None:
+            text_cell(meta.cell(2, 6 + q), period["legacy_manual_deduction"])
     for col, value in enumerate(("sheet_row", "key", "name", "source_row", "archived"), start=1):
         text_cell(meta.cell(6, col), value)
     for row, category in enumerate(summary["expenses"], start=7):
@@ -326,12 +360,19 @@ def parse_report(data: bytes) -> dict[str, Any]:
                 raise ValueError(f"Строка B{row} не соответствует исходному шаблону: ожидается «{label}».")
         metadata: dict[str, Any] = {}
         meta_rows: dict[int, dict[str, Any]] = {}
+        legacy_meta: list[Decimal | None] = [None] * 4
         if META_SHEET in wb.sheetnames:
             meta = wb[META_SHEET]
-            if meta["A1"].value != SIGNATURE:
+            signature = meta["A1"].value
+            if signature not in SUPPORTED_SIGNATURES:
                 raise ValueError("Неизвестная версия служебных данных XLSX.")
             metadata = {"organization": str(meta["B2"].value or ""), "year": str(meta["B3"].value or ""),
-                        "currency": str(meta["B4"].value or "")}
+                        "currency": str(meta["B4"].value or ""), "format": signature}
+            if signature == SIGNATURE:
+                for q in range(1, 5):
+                    header, value = meta.cell(1, 6 + q), meta.cell(2, 6 + q)
+                    if header.value == f"q{q}_legacy_manual_deduction" and value.value not in (None, ""):
+                        legacy_meta[q - 1] = _input_amount(value)
             if meta.max_row > MAX_ROWS + 10:
                 raise ValueError("Слишком много строк служебных данных XLSX.")
             seen_keys = set()
@@ -388,7 +429,14 @@ def parse_report(data: bytes) -> dict[str, Any]:
             if missing:
                 missing_cell = f"{get_column_letter(q + 3)}{INPUT_ROWS[missing[0]]}"
                 raise ValueError(f"{q} квартал заполнен не полностью: укажите число или 0 в {missing_cell}.")
-            quarters[q] = {"inputs": values, "expenses": [v if v is not None else ZERO for v in expense_values]}
+            legacy = legacy_meta[q - 1]
+            old_cell = cell(15, q + 3)
+            # В старом шаблоне строка 15 была ручной. Новые формулы не исполняются;
+            # числовое старое значение сохраняем только для истории.
+            if legacy is None and old_cell.data_type not in ("f", "e") and old_cell.value not in (None, ""):
+                legacy = _input_amount(old_cell)
+            quarters[q] = {"inputs": values, "expenses": [v if v is not None else ZERO for v in expense_values],
+                           "legacy_manual_deduction": legacy}
         if not quarters:
             raise ValueError("В книге нет заполненных кварталов для загрузки.")
         return {"metadata": metadata, "sheet": sheet.title, "categories": categories, "quarters": quarters}

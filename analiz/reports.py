@@ -41,6 +41,13 @@ def csv_number(value: Decimal | None) -> str:
     return "" if value is None else decimal_text(value).replace(".", ",")
 
 
+ERROR_FIELDS = {"vat_due", "non_vat_deduction", "adjusted_input_vat", "expense_tax_total"}
+
+
+def report_value(value: Decimal | None, key: str) -> str:
+    return "#ДЕЛ/0!" if value is None and key in ERROR_FIELDS else csv_number(value)
+
+
 def report_csv(summary: dict[str, Any]) -> bytes:
     out = io.StringIO(newline="")
     writer = csv.writer(out, delimiter=";", lineterminator="\r\n")
@@ -52,12 +59,18 @@ def report_csv(summary: dict[str, Any]) -> bytes:
     writer.writerow([])
     writer.writerow(["Строка Excel", "Показатель", "1 квартал", "2 квартал", "3 квартал", "4 квартал", "Итого за введённые кварталы"])
     for row, label, key in REPORT_ROWS:
-        q_values = [csv_number(q["metrics"][key]) if q["exists"] else "" for q in summary["quarters"]]
+        q_values = [report_value(q["metrics"][key], key) if q["exists"] else "" for q in summary["quarters"]]
         annual = summary["annual"][key]
-        annual_value = ("#ДЕЛ/0!" if key == "non_vat_deduction" and annual is None else csv_number(annual)) if summary["quarter_count"] else ""
+        annual_value = report_value(annual, key) if summary["quarter_count"] else ""
         writer.writerow([row, label, *q_values, annual_value])
-    writer.writerow(["", "Сумма квартальных вычетов (не H15)", "", "", "", "",
-                     csv_number(summary["annual"]["quarterly_deduction_sum"]) if summary["quarter_count"] else ""])
+    writer.writerow(["", "Сумма квартальных вычетов", "", "", "", "",
+                     report_value(summary["annual"]["quarterly_deduction_sum"], "non_vat_deduction") if summary["quarter_count"] else ""])
+    writer.writerow(["", "Статьи затрат + НДС + налог на прибыль (без себестоимости реализации)",
+                     *[report_value(q["metrics"]["expense_tax_total"], "expense_tax_total") if q["exists"] else "" for q in summary["quarters"]],
+                     report_value(summary["annual"]["expense_tax_total"], "expense_tax_total") if summary["quarter_count"] else ""])
+    if any(q.get("legacy_manual_deduction") is not None for q in summary["quarters"]):
+        writer.writerow(["", "Прежний ручной вычет (справочно, в расчёте не используется)",
+                         *[csv_number(Decimal(q["legacy_manual_deduction"])) if q.get("legacy_manual_deduction") is not None else "" for q in summary["quarters"]], ""])
     writer.writerow([])
     writer.writerow(["", "Статьи затрат", "1 квартал", "2 квартал", "3 квартал", "4 квартал", "Итого"])
     for expense in summary["expenses"]:

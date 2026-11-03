@@ -15,10 +15,10 @@ import tempfile
 from typing import Any, Iterator
 from uuid import uuid4
 
-from .analytics import COST_TYPES, period_analysis
-from .calculations import INPUT_FIELDS, ZERO, calculate_quarter, calculate_year, decimal_text, parse_amount
+from .analytics import COST_TYPES, expense_structure, period_analysis
+from .calculations import INPUT_FIELDS, STORED_FIELDS, ZERO, calculate_periods, calculate_year, decimal_text, parse_amount
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 INPUT_LABELS = {
     "retail_revenue": "Выручка ККМ с НДС",
     "invoice_revenue": "Реализация по накладным с НДС",
@@ -141,11 +141,14 @@ class Store:
 
     def _initialise(self) -> None:
         with self.connection() as con:
+            # Блокировка ДО чтения версии защищает от двух одновременных запусков,
+            # а транзакция делает создание и миграции единым атомарным действием.
+            con.execute("BEGIN IMMEDIATE")
             version = con.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
                 raise RuntimeError("База создана более новой версией программы. Обновите приложение и сохраните копию базы.")
             if version == 0:
-                con.executescript("""
+                script = """
                     CREATE TABLE organizations (
                         id INTEGER PRIMARY KEY,
                         name TEXT NOT NULL,
@@ -192,11 +195,19 @@ class Store:
                        != (SELECT organization_id FROM categories WHERE id=NEW.category_id)
                     BEGIN SELECT RAISE(ABORT, 'expense organization mismatch'); END;
                     PRAGMA user_version = 1;
-                """)
+                """
+                # executescript() не подходит: он неявно завершает транзакцию.
+                statement = ""
+                for line in script.splitlines(keepends=True):
+                    statement += line
+                    if sqlite3.complete_statement(statement):
+                        con.execute(statement)
+                        statement = ""
+                if statement.strip():
+                    raise RuntimeError("Неполная команда создания схемы.")
             if version <= 1:
                 # Миграция без изменения прежних сумм; ключи нужны для обмена Excel.
                 # Выполняется одной транзакцией, чтобы сбой не оставил полусхему.
-                con.execute("BEGIN IMMEDIATE")
                 con.execute("ALTER TABLE categories ADD COLUMN export_key TEXT")
                 for row in con.execute("SELECT id, organization_id, source_row FROM categories ORDER BY id").fetchall():
                     key = f"source:{row['source_row']}" if row["source_row"] is not None else f"custom:{uuid4().hex}"
@@ -212,7 +223,13 @@ class Store:
                     PRIMARY KEY(category_id, year)
                 )""")
                 con.execute("PRAGMA user_version = 2")
-                con.commit()
+            if version <= 2:
+                # Сохраняем прежний ручной вычет отдельно. Новые расчёты всех лет
+                # используют формулы книги 2; исторические вводы не уничтожаются.
+                con.execute("ALTER TABLE periods ADD COLUMN legacy_manual_deduction TEXT")
+                con.execute("UPDATE periods SET legacy_manual_deduction = non_vat_deduction")
+                con.execute("PRAGMA user_version = 3")
+            con.commit()
             con.execute("PRAGMA journal_mode = WAL")
 
     @staticmethod
@@ -293,6 +310,42 @@ class Store:
                 raise NotFoundError("Статья затрат не найдена.")
             return dict(con.execute("SELECT * FROM categories WHERE id=?", (cid,)).fetchone())
 
+    @staticmethod
+    def _category_impact(con: sqlite3.Connection, oid: int, cid: int) -> dict[str, Any]:
+        category = con.execute("SELECT * FROM categories WHERE organization_id=? AND id=?", (oid, cid)).fetchone()
+        if category is None:
+            raise NotFoundError("Статья затрат не найдена.")
+        records = [tuple(row) for row in con.execute(
+            """SELECT p.year,p.quarter,e.amount FROM expenses e JOIN periods p ON p.id=e.period_id
+               WHERE p.organization_id=? AND e.category_id=? ORDER BY p.year,p.quarter""", (oid, cid))]
+        settings = [tuple(row) for row in con.execute(
+            "SELECT year,cost_type,vat_rate FROM category_year_settings WHERE category_id=? ORDER BY year", (cid,))]
+        content = [oid, tuple(category), records, settings]
+        revision = hashlib.sha256(json.dumps(content, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+        return {"category": dict(category), "period_count": len(records),
+                "years": sorted({row[0] for row in records} | {row[0] for row in settings}),
+                "settings_count": len(settings), "revision": revision}
+
+    def category_impact(self, organization_id: Any, category_id: Any) -> dict[str, Any]:
+        with self.connection() as con:
+            con.execute("BEGIN")
+            oid = self._organization(con, organization_id)["id"]
+            return self._category_impact(con, oid, valid_id(category_id, "Статья затрат"))
+
+    def delete_category(self, organization_id: Any, category_id: Any, *,
+                        confirmed: Any, expected_revision: Any) -> None:
+        """Явное необратимое удаление с проверкой влияния на ВСЕ годы."""
+        if confirmed is not True or not isinstance(expected_revision, str):
+            raise ValueError("Подтвердите удаление статьи и её истории.")
+        with self.connection() as con:
+            con.execute("BEGIN IMMEDIATE")
+            oid = self._organization(con, organization_id)["id"]
+            cid = valid_id(category_id, "Статья затрат")
+            impact = self._category_impact(con, oid, cid)
+            if impact["revision"] != expected_revision:
+                raise ValueError("История статьи изменилась в другом окне. Проверьте удаление ещё раз.")
+            con.execute("DELETE FROM categories WHERE organization_id=? AND id=?", (oid, cid))
+
     def get_period(self, organization_id: Any, year: Any, quarter: Any) -> dict[str, Any] | None:
         y, q = valid_year(year), valid_quarter(quarter)
         with self.connection() as con:
@@ -304,6 +357,7 @@ class Store:
             expenses = {str(r["category_id"]): r["amount"] for r in con.execute(
                 "SELECT category_id, amount FROM expenses WHERE period_id=?", (row["id"],))}
             return {"year": y, "quarter": q, "inputs": {key: row[key] for key in INPUT_FIELDS},
+                    "legacy_manual_deduction": row["legacy_manual_deduction"],
                     "expenses": expenses, "updated_at": row["updated_at"]}
 
     @staticmethod
@@ -326,16 +380,18 @@ class Store:
     @staticmethod
     def _put_period(con: sqlite3.Connection, oid: int, y: int, q: int,
                     values: dict[str, Decimal], expense_values: dict[int, Decimal],
-                    categories: dict[int, Any]) -> None:
+                    categories: dict[int, Any], legacy_deduction: Decimal | None = None) -> None:
         if not set(expense_values).issubset(categories):
             raise ValueError("В списке затрат есть статья другой организации или удалённая статья.")
-        fields_sql = ", ".join(INPUT_FIELDS)
-        placeholders = ", ".join("?" for _ in INPUT_FIELDS)
+        fields_sql = ", ".join((*STORED_FIELDS, "legacy_manual_deduction"))
+        placeholders = ", ".join("?" for _ in range(len(STORED_FIELDS) + 1))
+        # При повторном сохранении прежний ручной ввод не стирается.
         updates = ", ".join(f"{field}=excluded.{field}" for field in INPUT_FIELDS)
+        legacy = decimal_text(legacy_deduction) if legacy_deduction is not None else None
         con.execute(f"""INSERT INTO periods(organization_id,year,quarter,{fields_sql})
             VALUES (?,?,?,{placeholders}) ON CONFLICT(organization_id,year,quarter)
-            DO UPDATE SET {updates}, updated_at=CURRENT_TIMESTAMP""",
-            (oid, y, q, *(decimal_text(values[field]) for field in INPUT_FIELDS)))
+            DO UPDATE SET {updates}, legacy_manual_deduction=COALESCE(periods.legacy_manual_deduction,excluded.legacy_manual_deduction), updated_at=CURRENT_TIMESTAMP""",
+            (oid, y, q, *(decimal_text(values[field]) for field in INPUT_FIELDS), legacy or "0", legacy))
         pid = con.execute("SELECT id FROM periods WHERE organization_id=? AND year=? AND quarter=?", (oid, y, q)).fetchone()[0]
         # Архивные статьи, отсутствующие в запросе, остаются нетронутыми.
         replace_ids = {cid for cid, cat in categories.items() if not cat["archived"]} | set(expense_values)
@@ -373,8 +429,8 @@ class Store:
         setting_rows = con.execute("""SELECT s.category_id,s.cost_type,s.vat_rate FROM category_year_settings s
                                      JOIN categories c ON c.id=s.category_id
                                      WHERE c.organization_id=? AND s.year=? ORDER BY s.category_id""", (oid, year))
-        fields_sql = ",".join(INPUT_FIELDS)
-        period_rows = con.execute(f"SELECT quarter,{fields_sql} FROM periods WHERE organization_id=? AND year=? ORDER BY quarter", (oid, year))
+        fields_sql = ",".join(STORED_FIELDS)
+        period_rows = con.execute(f"SELECT quarter,{fields_sql},legacy_manual_deduction FROM periods WHERE organization_id=? AND year=? ORDER BY quarter", (oid, year))
         expense_rows = con.execute("""SELECT p.quarter,e.category_id,e.amount FROM expenses e
                                      JOIN periods p ON p.id=e.period_id
                                      WHERE p.organization_id=? AND p.year=? ORDER BY p.quarter,e.category_id""", (oid, year))
@@ -406,12 +462,17 @@ class Store:
             for row in rows:
                 expenses = expense_map.get(row["id"], {})
                 inputs = {key: Decimal(row[key]) for key in INPUT_FIELDS}
-                metrics = calculate_quarter(inputs, expenses.values())
                 history.setdefault(row["year"], {})[row["quarter"]] = {
-                    "quarter": row["quarter"], "metrics": metrics, "expenses": expenses,
+                    "quarter": row["quarter"], "inputs": inputs, "expenses": expenses,
+                    "legacy_manual_deduction": row["legacy_manual_deduction"],
                 }
             revision = self._year_revision(con, oid, year)
         return organization, categories, history, settings, revision
+
+    @staticmethod
+    def _calculate_periods(periods: dict[int, dict[str, Any]]) -> tuple[list[dict[str, Decimal | None]], dict[str, Decimal | None]]:
+        values = [(periods[q]["inputs"], periods[q]["expenses"].values()) if q in periods else None for q in range(1, 5)]
+        return calculate_periods(values)
 
     @staticmethod
     def _summarize(organization: dict[str, Any], y: int, categories: list[dict[str, Any]],
@@ -431,14 +492,16 @@ class Store:
                 rate, kind = setting["vat_rate"], setting["cost_type"]
             effective_categories.append({**category, "vat_rate": rate, "cost_type": kind})
         classification = {cat["id"]: cat["cost_type"] for cat in effective_categories}
-        annual = calculate_year(item["metrics"] for item in selected.values())
+        calculated, annual = Store._calculate_periods(selected)
         quarters = []
         for q in range(1, 5):
             item = selected.get(q)
+            metrics = calculated[q - 1]
             quarters.append({"quarter": q, "exists": item is not None,
                              "state": (statuses or {}).get(q, "saved" if item else "empty"),
-                             "metrics": item["metrics"] if item else None,
-                             "analysis": period_analysis(item["metrics"], item["expenses"], classification) if item else None})
+                             "legacy_manual_deduction": item.get("legacy_manual_deduction") if item else None,
+                             "metrics": metrics if item else None,
+                             "analysis": period_analysis(metrics, item["expenses"], classification) if item else None})
         detail = []
         totals_by_category: dict[int, Decimal] = {}
         for category in effective_categories:
@@ -449,17 +512,19 @@ class Store:
             totals_by_category[category["id"]] = category_total
             detail.append({**category, "quarters": by_quarter, "total": category_total})
         year_history = [{"year": hy, "quarters": sorted(periods), "count": len(periods),
-                         "annual": calculate_year(item["metrics"] for item in periods.values())}
+                         "annual": Store._calculate_periods(periods)[1]}
                         for hy, periods in sorted(history.items()) if periods]
         previous = history.get(y - 1, {})
         compare_quarters = sorted(selected)
         comparable = None
         if compare_quarters and all(q in previous for q in compare_quarters):
+            previous_metrics, _ = Store._calculate_periods(previous)
             comparable = {"year": y - 1, "quarters": compare_quarters,
-                          "annual": calculate_year(previous[q]["metrics"] for q in compare_quarters)}
+                          "annual": calculate_year(previous_metrics[q - 1] for q in compare_quarters)}
         return {"organization": organization, "year": y, "quarter_count": len(selected),
                 "quarters": quarters, "annual": annual, "expenses": detail,
                 "analysis": period_analysis(annual, totals_by_category, classification) if selected else None,
+                "expense_structure": expense_structure(detail, annual, has_periods=bool(selected)),
                 "history": year_history, "comparison": comparable}
 
     def summary(self, organization_id: Any, year: Any) -> dict[str, Any]:
@@ -531,7 +596,8 @@ class Store:
             for cid, amount in history.get(y, {}).get(q, {}).get("expenses", {}).items():
                 if cid not in expenses and cat_map[cid]["archived"]:
                     expenses[cid] = amount
-            selected[q] = {"quarter": q, "metrics": calculate_quarter(values, expenses.values()), "expenses": expenses}
+            selected[q] = {"quarter": q, "inputs": values, "expenses": expenses,
+                           "legacy_manual_deduction": history.get(y, {}).get(q, {}).get("legacy_manual_deduction")}
         history[y] = selected
         result = self._summarize(organization, y, categories, history, settings, statuses)
         result["revision"] = revision
@@ -602,7 +668,8 @@ class Store:
                 "all_existing_quarters": sorted(existing), "category_count": len(incoming),
                 "new_categories": [item["name"] for item, cid in zip(incoming, mapping) if cid is None],
                 "unassigned_types": sum(item.get("cost_type") in (None, "unclassified") for item in incoming),
-                "unknown_rates": sum(item.get("vat_rate") is None for item in incoming)}
+                "unknown_rates": sum(item.get("vat_rate") is None for item in incoming),
+                "legacy_deductions": sum(q.get("legacy_manual_deduction") is not None for q in report["quarters"].values())}
 
     def import_year(self, organization_id: Any, year: Any, report: dict[str, Any], *,
                     replace_existing: Any, apply_settings: Any, expected_revision: Any = None) -> dict[str, Any]:
@@ -640,7 +707,8 @@ class Store:
                 # Явная замена квартала означает замену ВСЕХ статей, даже архивных.
                 expense_values = {cid: ZERO for cid in categories}
                 expense_values.update({int(cid): amount for cid, amount in zip(mapping, item["expenses"])})
-                self._put_period(con, oid, y, q, item["inputs"], expense_values, categories)
+                self._put_period(con, oid, y, q, item["inputs"], expense_values, categories,
+                                 legacy_deduction=item.get("legacy_manual_deduction"))
                 imported.append(q)
             if apply_settings:
                 for item, cid in zip(incoming, mapping):

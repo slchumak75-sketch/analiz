@@ -1,4 +1,4 @@
-"""Формулы книги «ОТЧЕТ ПО ОРГАНИЗАЦИИ мир.xlsx».
+"""Формулы книги «ОТЧЕТ ПО ОРГАНИЗАЦИИ мир 2.xlsx».
 
 Ввод хранится как Decimal, а не float. Промежуточное округление намеренно не
 делается: формат Excel показывает две цифры, но формулы работают с полной
@@ -21,7 +21,6 @@ INPUT_FIELDS = (
     "invoice_revenue",      # 9: Реализация (накладные) с НДС
     "invoice_vat",          # 12: НДС реализации по накладным
     "non_vat_sales",        # 14: Товары реализация без НДС
-    "non_vat_deduction",    # 15: Вычет по товарам без НДС
     "input_vat",            # 16: Входящий НДС
     "cost_of_sales",        # 18: Себестоимость реализации без НДС
 )
@@ -62,29 +61,41 @@ def _margin(net_profit: Decimal, revenue_without_vat: Decimal) -> Decimal | None
     return net_profit / revenue_without_vat * 100 if revenue_without_vat > ZERO else None
 
 
-def calculate_quarter(inputs: Mapping[str, Decimal], expenses: Iterable[Decimal]) -> dict[str, Decimal | None]:
-    """Строки 4–19 для одной колонки D/E/F/G; затраты — строки 20–55."""
+# Прежнее ручное поле осталось в SQLite для сохранения истории, но больше не вводится.
+LEGACY_DEDUCTION_FIELD = "non_vat_deduction"
+STORED_FIELDS = (*INPUT_FIELDS, LEGACY_DEDUCTION_FIELD)
+_AUTO_FIRST_QUARTER = object()
+
+
+def calculate_quarter(inputs: Mapping[str, Decimal], expenses: Iterable[Decimal], *,
+                      deduction: Decimal | None | object = _AUTO_FIRST_QUARTER) -> dict[str, Decimal | None]:
+    """Расчёт одной колонки. Накопительный вычет передаёт calculate_periods()."""
     with localcontext() as context:
         context.prec = 40
         for key in INPUT_FIELDS:
             if key not in inputs:
                 raise ValueError(f"Отсутствует обязательный показатель: {key}")
         result: dict[str, Decimal | None] = {key: inputs[key] for key in INPUT_FIELDS}
-        cost_expenses = sum(expenses, ZERO)                    # 19
-        revenue = inputs["retail_revenue"] + inputs["invoice_revenue"]  # 10
+        cost_expenses = sum(expenses, ZERO)
+        revenue = inputs["retail_revenue"] + inputs["invoice_revenue"]
+        if deduction is _AUTO_FIRST_QUARTER:
+            deduction = inputs["input_vat"] / revenue * inputs["non_vat_sales"] if revenue != ZERO else None
+        if deduction is not None and not isinstance(deduction, Decimal):
+            raise ValueError("Некорректный расчёт вычета.")
         taxable_revenue = revenue - inputs["non_vat_sales"]
-        output_vat = taxable_revenue - taxable_revenue / VAT_DIVISOR  # 13
-        retail_vat = output_vat - inputs["invoice_vat"]        # 11
-        adjusted_input_vat = inputs["input_vat"] - inputs["non_vat_deduction"]  # 17
-        vat_due = output_vat - adjusted_input_vat              # 4
-        profit = revenue - output_vat - inputs["cost_of_sales"] - cost_expenses  # 6
-        profit_tax = profit * PROFIT_TAX_RATE                  # 5 (в т. ч. отрицательный!)
-        net_profit = profit - profit_tax                      # 7
-        revenue_without_vat = revenue - output_vat            # дополнительная аналитика
+        output_vat = taxable_revenue - taxable_revenue / VAT_DIVISOR
+        retail_vat = output_vat - inputs["invoice_vat"]
+        adjusted_input_vat = inputs["input_vat"] - deduction if deduction is not None else None
+        vat_due = output_vat - adjusted_input_vat if adjusted_input_vat is not None else None
+        profit = revenue - output_vat - inputs["cost_of_sales"] - cost_expenses
+        profit_tax = profit * PROFIT_TAX_RATE
+        net_profit = profit - profit_tax
+        revenue_without_vat = revenue - output_vat
         result.update({
             "revenue": revenue,
             "retail_vat": retail_vat,
             "output_vat": output_vat,
+            "non_vat_deduction": deduction,
             "adjusted_input_vat": adjusted_input_vat,
             "vat_due": vat_due,
             "expense_total": cost_expenses,
@@ -93,13 +104,16 @@ def calculate_quarter(inputs: Mapping[str, Decimal], expenses: Iterable[Decimal]
             "net_profit": net_profit,
             "revenue_without_vat": revenue_without_vat,
             "total_costs": inputs["cost_of_sales"] + cost_expenses,
+            # Отдельная аналитика: по выбору владельца БЕЗ себестоимости реализации.
+            # Налог на прибыль уже учтён в net_profit; формулы прибыли не меняем.
+            "expense_tax_total": cost_expenses + vat_due + profit_tax if vat_due is not None else None,
             "net_margin": _margin(net_profit, revenue_without_vat),
         })
         return result
 
 
 def calculate_year(quarters: Iterable[Mapping[str, Decimal | None] | None]) -> dict[str, Decimal | None]:
-    """Итоги H: сохраняем особую H15 и не подменяем H17 = SUM(D17:G17)."""
+    """Итоги H: H15 из H14/H10*H16, H17 и H4 — суммы колонок D:G."""
     with localcontext() as context:
         context.prec = 40
         existing = [quarter for quarter in quarters if quarter is not None]
@@ -107,22 +121,58 @@ def calculate_year(quarters: Iterable[Mapping[str, Decimal | None] | None]) -> d
                     "vat_due", "expense_total", "profit_tax")
         annual: dict[str, Decimal | None] = {}
         for key in additive:
-            annual[key] = sum((quarter[key] for quarter in existing), ZERO)  # type: ignore[arg-type]
+            values = [quarter[key] for quarter in existing]
+            annual[key] = None if any(value is None for value in values) else sum(values, ZERO)  # type: ignore[arg-type]
 
-        # Эти строки в Excel вычисляются из годовых итогов, а не через H15.
         annual["profit"] = annual["revenue"] - annual["output_vat"] - annual["cost_of_sales"] - annual["expense_total"]  # type: ignore[operator]
         annual["net_profit"] = annual["profit"] - annual["profit_tax"]  # type: ignore[operator]
         annual["revenue_without_vat"] = annual["revenue"] - annual["output_vat"]  # type: ignore[operator]
         annual["total_costs"] = annual["cost_of_sales"] + annual["expense_total"]  # type: ignore[operator]
+        annual["expense_tax_total"] = (annual["expense_total"] + annual["vat_due"] + annual["profit_tax"]
+                                       if annual["vat_due"] is not None else None)  # type: ignore[operator]
         annual["net_margin"] = _margin(annual["net_profit"], annual["revenue_without_vat"])  # type: ignore[arg-type]
-
-        quarterly_deduction = annual["non_vat_deduction"]  # Сумма D15:G15, не формула H15.
         revenue = annual["revenue"]
         annual_deduction = (annual["non_vat_sales"] / revenue * annual["input_vat"]) if revenue != ZERO else None  # type: ignore[operator]
-        annual["quarterly_deduction_sum"] = quarterly_deduction
-        annual["non_vat_deduction"] = annual_deduction          # H15
-        annual["deduction_difference"] = (annual_deduction - quarterly_deduction) if annual_deduction is not None else None  # type: ignore[operator]
+        deductions = [quarter["non_vat_deduction"] for quarter in existing]
+        quarterly_sum = None if any(value is None for value in deductions) else sum(deductions, ZERO)  # type: ignore[arg-type]
+        annual["quarterly_deduction_sum"] = quarterly_sum
+        annual["non_vat_deduction"] = annual_deduction
+        annual["deduction_difference"] = annual_deduction - quarterly_sum if annual_deduction is not None and quarterly_sum is not None else None
         return annual
+
+
+def calculate_periods(periods: Iterable[tuple[Mapping[str, Decimal], Iterable[Decimal]] | None]
+                      ) -> tuple[list[dict[str, Decimal | None]], dict[str, Decimal | None]]:
+    """Все четыре колонки с накопительной строкой 15 и распространением #ДЕЛ/0!.
+
+    Отсутствующие периоды участвуют в формулах как пустые ячейки Excel (нули),
+    но вызывающий код отдельно сохраняет признак отсутствующего квартала.
+    """
+    items = list(periods)
+    if len(items) != 4:
+        raise ValueError("Для расчёта нужны четыре квартала.")
+    with localcontext() as context:
+        context.prec = 40
+        empty = {key: ZERO for key in INPUT_FIELDS}
+        inputs = [item[0] if item is not None else empty for item in items]
+        revenues = [value["retail_revenue"] + value["invoice_revenue"] for value in inputs]
+        vat = [value["input_vat"] for value in inputs]
+        nonvat = [value["non_vat_sales"] for value in inputs]
+        total_revenue = sum(revenues, ZERO)
+        annual_deduction = (sum(nonvat, ZERO) / total_revenue * sum(vat, ZERO)) if total_revenue != ZERO else None
+        d1 = vat[0] / revenues[0] * nonvat[0] if revenues[0] != ZERO else None
+        rev2 = revenues[0] + revenues[1]
+        d2 = ((vat[0] + vat[1]) / rev2 * (nonvat[0] + nonvat[1]) - d1
+              if rev2 != ZERO and d1 is not None else None)
+        rev3 = revenues[0] + revenues[1] + revenues[2]
+        d3 = ((vat[0] + vat[1] + vat[2]) / rev3 * (nonvat[0] + nonvat[1] + nonvat[2]) - d1 - d2
+              if rev3 != ZERO and d1 is not None and d2 is not None else None)
+        d4 = (annual_deduction - d3 - d2 - d1
+              if annual_deduction is not None and d3 is not None and d2 is not None and d1 is not None else None)
+        deductions = [d1, d2, d3, d4]
+        calculated = [calculate_quarter(inputs[i], items[i][1] if items[i] is not None else (), deduction=deductions[i])
+                      for i in range(4)]
+        return calculated, calculate_year(calculated)
 
 
 def json_ready(value: Any) -> Any:

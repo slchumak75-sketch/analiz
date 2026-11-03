@@ -149,3 +149,75 @@ def test_excel_percentage_formats_preserve_the_intended_vat_rate(value, number_f
     out = BytesIO(); wb.save(out); wb.close()
     report = parse_report(out.getvalue())
     assert next(cat['vat_rate'] for cat in report['categories'] if cat['row'] == 31) == '25'
+
+
+def test_old_and_new_source_deduction_import_is_history_only():
+    old = parse_report((ROOT / 'ОТЧЕТ ПО ОРГАНИЗАЦИИ мир.xlsx').read_bytes())
+    new = parse_report((ROOT / 'ОТЧЕТ ПО ОРГАНИЗАЦИИ мир 2.xlsx').read_bytes())
+    assert old['quarters'].keys() == new['quarters'].keys()
+    assert all(q['legacy_manual_deduction'] is not None for q in old['quarters'].values())
+    assert all(q['legacy_manual_deduction'] is None for q in new['quarters'].values())
+    assert all('non_vat_deduction' not in q['inputs'] for q in new['quarters'].values())
+
+
+def test_v2_xlsx_manual_history_survives_v3_export_and_import(tmp_path):
+    store = Store(tmp_path / 'legacy.xlsx.sqlite3')
+    oid = store.create_organization('Синтетическая')['id']
+    store.save_period(oid, 2026, 1, values(retail_revenue=120, non_vat_sales=12, input_vat=10), {})
+    wb = load_workbook(BytesIO(make_report(store.summary(oid, 2026))))
+    wb['__ANALIZ_META__']['A1'] = 'ANALIZ_XLSX_V2'
+    wb['Лист1']['D15'] = 99.75  # формат старого экспорта: ручной ввод
+    out = BytesIO(); wb.save(out); wb.close()
+    parsed = parse_report(out.getvalue())
+    assert parsed['metadata']['format'] == 'ANALIZ_XLSX_V2'
+    assert parsed['quarters'][1]['legacy_manual_deduction'] == D('99.75')
+    dest = Store(tmp_path / 'dest.sqlite3'); dest_id = dest.create_organization('Назначение')['id']
+    imported = dest.import_year(dest_id, 2027, parsed, replace_existing=False, apply_settings=False)['summary']
+    assert imported['quarters'][0]['legacy_manual_deduction'] == '99.75'
+    assert imported['quarters'][0]['metrics']['non_vat_deduction'] == D('1')
+    exported = make_report(imported)
+    wb = load_workbook(BytesIO(exported), data_only=False)
+    try:
+        assert wb['__ANALIZ_META__']['A1'].value == 'ANALIZ_XLSX_V3'
+        assert [wb['Лист1'][f'{col}15'].value for col in 'DEFGH'] == [
+            '=D16/D10*D14', '=(D16+E16)/(D10+E10)*(D14+E14)-D15',
+            '=(D16+E16+F16)/(D10+E10+F10)*(D14+E14+F14)-D15-E15',
+            '=H15-F15-E15-D15', '=H14/H10*H16']
+        assert wb['Лист1']['H17'].value == '=D17+E17+F17+G17'
+        assert wb['Аналитика']['A9'].value.startswith('Статьи затрат + НДС')
+        assert wb['Аналитика']['F9'].value == 29.4  # НДС 9 + налог на прибыль 20,4
+    finally:
+        wb.close()
+    parsed_again = parse_report(exported)
+    assert parsed_again['quarters'][1]['legacy_manual_deduction'] == D('99.75')
+    assert parsed_again['quarters'][1]['inputs']['non_vat_sales'] == 12
+
+
+def test_import_does_not_overwrite_preexisting_legacy_manual_history(tmp_path):
+    store = Store(tmp_path / 'preserve-history.sqlite3')
+    oid = store.create_organization('Синтетическая')['id']
+    store.save_period(oid, 2026, 1, values(retail_revenue=120, non_vat_sales=12, input_vat=10), {})
+    with store.connection() as con:
+        con.execute('UPDATE periods SET legacy_manual_deduction=? WHERE organization_id=? AND year=? AND quarter=?', ('42.5', oid, 2026, 1))
+    data = make_report(store.summary(oid, 2026))
+    wb = load_workbook(BytesIO(data)); wb['__ANALIZ_META__']['A1'] = 'ANALIZ_XLSX_V2'; wb['Лист1']['D15'] = 99.75
+    out = BytesIO(); wb.save(out); wb.close()
+    imported = store.import_year(oid, 2026, parse_report(out.getvalue()), replace_existing=True, apply_settings=False)['summary']
+    assert imported['quarters'][0]['legacy_manual_deduction'] == '42.5'
+    assert imported['quarters'][0]['metrics']['non_vat_deduction'] == D('1')
+
+
+def test_xlsx_analytics_marks_error_for_missing_initial_quarter(tmp_path):
+    store = Store(tmp_path / 'error.sqlite3')
+    oid = store.create_organization('Синтетическая')['id']
+    store.save_period(oid, 2026, 2, values(retail_revenue=120, non_vat_sales=12, input_vat=10), {})
+    data = make_report(store.summary(oid, 2026))
+    wb = load_workbook(BytesIO(data), data_only=False)
+    try:
+        assert wb['Аналитика']['A9'].value.startswith('Статьи затрат + НДС')
+        assert wb['Аналитика']['B9'].value is None
+        assert wb['Аналитика']['C9'].value == '#ДЕЛ/0!'
+        assert wb['Аналитика']['F9'].value == '#ДЕЛ/0!'
+        assert wb['Лист1']['H15'].value == '=H14/H10*H16'
+    finally:
+        wb.close()

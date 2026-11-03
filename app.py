@@ -10,7 +10,7 @@ import tempfile
 import threading
 import webbrowser
 
-from analiz.calculations import INPUT_FIELDS, calculate_quarter
+from analiz.calculations import INPUT_FIELDS, calculate_periods
 from analiz.server import AnalizServer
 from analiz.store import Store
 
@@ -30,11 +30,18 @@ def self_test() -> None:
         store = Store(Path(temp) / "data.sqlite3")
         org = store.create_organization("Проверка")
         values = {key: "0" for key in INPUT_FIELDS}
-        values["retail_revenue"] = "120"
+        values.update(retail_revenue="120", non_vat_sales="12", input_vat="10")
         store.save_period(org["id"], 2026, 1, values, {})
         result = store.summary(org["id"], 2026)
-        assert result["annual"]["output_vat"] == Decimal("20")
+        assert result["annual"]["output_vat"] == Decimal("18")
+        assert result["quarters"][0]["metrics"]["non_vat_deduction"] == Decimal("1")
+        assert result["annual"]["vat_due"] == Decimal("9")
         assert result["quarter_count"] == 1
+        first = {key: Decimal(value) for key, value in values.items()}
+        second = {**first, "non_vat_sales": Decimal("36")}
+        periods, annual = calculate_periods([(first, []), (second, []), None, None])
+        assert periods[1]["non_vat_deduction"] == Decimal("3")
+        assert annual["non_vat_deduction"] == Decimal("4")
         from analiz.excel import make_report, parse_report
         report = parse_report(make_report(result))
         assert sorted(report["quarters"]) == [1] and report["metadata"]["year"] == "2026"

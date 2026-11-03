@@ -1,6 +1,6 @@
 """Воспроизводимая инвентаризация исходной XLSX без публикации сумм.
 
-python scripts/audit_workbook.py --write   # обновить docs/workbook-formulas.md
+python scripts/audit_workbook.py --write   # обновить оба отчёта в docs/
 python scripts/audit_workbook.py --check   # убедиться, что инвентаризация актуальна
 """
 from __future__ import annotations
@@ -15,6 +15,8 @@ from openpyxl.formula import Tokenizer
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "ОТЧЕТ ПО ОРГАНИЗАЦИИ мир.xlsx"
 OUTPUT = ROOT / "docs" / "workbook-formulas.md"
+SOURCE_NEW = ROOT / "ОТЧЕТ ПО ОРГАНИЗАЦИИ мир 2.xlsx"
+OUTPUT_NEW = ROOT / "docs" / "workbook-2-formulas.md"
 
 
 def clean(value: object) -> str:
@@ -64,17 +66,20 @@ def main() -> int:
     group.add_argument("--write", action="store_true")
     group.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    content = build_inventory()
-    if args.write:
-        OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-        OUTPUT.write_text(content, encoding="utf-8", newline="\n")
-        print(f"Записано: {OUTPUT.relative_to(ROOT)}")
-        return 0
-    if not OUTPUT.exists() or OUTPUT.read_text(encoding="utf-8") != content:
-        print("Инвентаризация устарела: проверьте изменения книги и выполните --write.")
-        return 1
-    print("Инвентаризация соответствует книге.")
-    return 0
+    stale = False
+    for source, output in ((SOURCE, OUTPUT), (SOURCE_NEW, OUTPUT_NEW)):
+        content = build_inventory(source)
+        if args.write:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(content, encoding="utf-8", newline="\n")
+            print(f"Записано: {output.relative_to(ROOT)}")
+        elif not output.exists() or output.read_text(encoding="utf-8") != content:
+            print(f"Инвентаризация устарела: {source.name}. Проверьте книгу и выполните --write.")
+            stale = True
+        else:
+            print(f"Инвентаризация соответствует книге: {source.name}.")
+    return 1 if stale else 0
+
 
 
 if __name__ == "__main__":

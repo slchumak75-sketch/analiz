@@ -58,3 +58,35 @@ def period_analysis(metrics: Mapping[str, Decimal | None], expenses: Mapping[int
             result["safety_amount"] = revenue - threshold
             result["safety_percent"] = (revenue - threshold) / revenue * 100
         return result
+
+
+def expense_structure(expenses: list[dict[str, Any]], annual: Mapping[str, Decimal | None],
+                      *, has_periods: bool) -> dict[str, Any]:
+    """Доли статей и двух налогов без себестоимости реализации (решение владельца).
+
+    Налоговые показатели берутся со знаком. Они добавляются только для анализа;
+    формулы прибыли и безубыточности остаются без изменений.
+    """
+    with localcontext() as context:
+        context.prec = 40
+        items = [{"kind": "category", "category_id": item["id"], "name": item["name"],
+                  "vat_rate": item["vat_rate"], "amount": item["total"], "archived": bool(item["archived"])}
+                 for item in expenses]
+        items.extend([
+            {"kind": "vat", "category_id": None, "name": "Налог НДС", "vat_rate": None, "amount": annual["vat_due"]},
+            {"kind": "profit_tax", "category_id": None, "name": "Налог на прибыль", "vat_rate": None, "amount": annual["profit_tax"]},
+        ])
+        total = annual["expense_tax_total"] if has_periods else None
+        if not has_periods:
+            status = "no_data"
+        elif annual["vat_due"] is None:
+            status = "vat_undefined"
+        elif total is None or total <= ZERO:
+            status = "nonpositive_total"
+        else:
+            status = "ready"
+        for item in items:
+            amount = item["amount"]
+            item["share_percent"] = amount / total * 100 if status == "ready" and amount is not None else None  # type: ignore[operator]
+        return {"total": total, "status": status, "items": items,
+                "includes_cost_of_sales": False}
