@@ -36,6 +36,8 @@ def self_test() -> None:
         assert result["annual"]["output_vat"] == Decimal("18")
         assert result["quarters"][0]["metrics"]["non_vat_deduction"] == Decimal("1")
         assert result["annual"]["vat_due"] == Decimal("9")
+        assert result["expense_structure"]["quarters"][0]["total"] == Decimal("29.4")
+        assert next(item for item in result["expense_structure"]["items"] if item["kind"] == "vat")["quarter_amounts"][0] == Decimal("9")
         assert result["quarter_count"] == 1
         first = {key: Decimal(value) for key, value in values.items()}
         second = {**first, "non_vat_sales": Decimal("36")}

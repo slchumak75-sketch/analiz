@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import time
 from typing import Any, Iterator
 from uuid import uuid4
 
@@ -139,6 +140,24 @@ class Store:
         finally:
             con.close()
 
+    @staticmethod
+    def _enable_wal(con: sqlite3.Connection) -> None:
+        """Переключение журнала может кратко столкнуться с миграцией другого окна."""
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                mode = con.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+                if str(mode).lower() != "wal":
+                    raise sqlite3.OperationalError("Не удалось включить WAL для базы.")
+                return
+            except sqlite3.OperationalError as exc:
+                code = getattr(exc, "sqlite_errorcode", None)
+                transient = (code is not None and (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED))
+                transient = transient or (code is None and str(exc).lower() in ("database is locked", "database is busy"))
+                if not transient or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.02)
+
     def _initialise(self) -> None:
         with self.connection() as con:
             # Блокировка ДО чтения версии защищает от двух одновременных запусков,
@@ -230,7 +249,7 @@ class Store:
                 con.execute("UPDATE periods SET legacy_manual_deduction = non_vat_deduction")
                 con.execute("PRAGMA user_version = 3")
             con.commit()
-            con.execute("PRAGMA journal_mode = WAL")
+            self._enable_wal(con)
 
     @staticmethod
     def _organization(con: sqlite3.Connection, organization_id: Any) -> sqlite3.Row:
@@ -524,7 +543,7 @@ class Store:
         return {"organization": organization, "year": y, "quarter_count": len(selected),
                 "quarters": quarters, "annual": annual, "expenses": detail,
                 "analysis": period_analysis(annual, totals_by_category, classification) if selected else None,
-                "expense_structure": expense_structure(detail, annual, has_periods=bool(selected)),
+                "expense_structure": expense_structure(detail, annual, quarters, has_periods=bool(selected)),
                 "history": year_history, "comparison": comparable}
 
     def summary(self, organization_id: Any, year: Any) -> dict[str, Any]:

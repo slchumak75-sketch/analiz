@@ -146,3 +146,64 @@ def test_positive_structure_total_keeps_negative_tax_and_signed_shares(tmp_path)
     assert structure['status'] == 'ready' and structure['total'] == D('40')
     assert next(i for i in structure['items'] if i['kind'] == 'vat')['share_percent'] == D('-25')
     assert next(i for i in structure['items'] if i['category_id'] == cid)['share_percent'] == D('125')
+    assert next(i for i in structure['items'] if i['kind'] == 'vat')['quarter_share_percent'][0] == D('-25')
+    assert next(i for i in structure['items'] if i['category_id'] == cid)['quarter_share_percent'][0] == D('125')
+
+
+def test_quarterly_structure_uses_each_quarter_total_and_keeps_taxes(tmp_path):
+    store = Store(tmp_path / 'quarterly.sqlite3')
+    oid = store.create_organization('А')['id']
+    cid = store.categories(oid)[0]['id']
+    store.save_period(oid, 2026, 1, amounts(retail_revenue=120, non_vat_sales=12, input_vat=10, cost_of_sales=50), {str(cid): '3'})
+    store.save_period(oid, 2026, 2, amounts(retail_revenue=120, non_vat_sales=24, input_vat=10, cost_of_sales=50), {str(cid): '6'})
+    structure = store.summary(oid, 2026)['expense_structure']
+    assert [q['status'] for q in structure['quarters']] == ['ready', 'ready', 'no_data', 'no_data']
+    # Q1: статья 3 + НДС 9 + налог на прибыль 9.8 = 21.8.
+    # Q2: статья 6 + НДС 8 + налог на прибыль 9.6 = 23.6.
+    assert [q['total'] for q in structure['quarters']] == [D('21.8'), D('23.6'), None, None]
+    category = next(i for i in structure['items'] if i['category_id'] == cid)
+    vat = next(i for i in structure['items'] if i['kind'] == 'vat')
+    tax = next(i for i in structure['items'] if i['kind'] == 'profit_tax')
+    assert category['quarter_amounts'] == [D('3'), D('6'), None, None]
+    assert vat['quarter_amounts'] == [D('9'), D('8'), None, None]
+    assert tax['quarter_amounts'] == [D('9.8'), D('9.6'), None, None]
+    assert abs(category['quarter_share_percent'][0] - D('13.76146788990825688073394495412844036697')) < D('1e-36')
+    assert abs(category['quarter_share_percent'][1] - D('25.42372881355932203389830508474576271186')) < D('1e-36')
+    assert category['quarter_share_percent'][2:] == [None, None]
+    # Скрытие в архив не меняет ни знаменатель, ни числитель.
+    store.update_category(oid, cid, archived=True)
+    archived = store.summary(oid, 2026)['expense_structure']
+    assert archived['quarters'] == structure['quarters']
+    assert next(i for i in archived['items'] if i['category_id'] == cid)['quarter_share_percent'] == category['quarter_share_percent']
+
+
+def test_quarterly_structure_distinguishes_undefined_and_nonpositive(tmp_path):
+    store = Store(tmp_path / 'quarterly-invalid.sqlite3')
+    oid = store.create_organization('А')['id']
+    cid = store.categories(oid)[0]['id']
+    # Нет Q1 -> формульный НДС Q2 не определён, даже если доход есть.
+    store.save_period(oid, 2026, 2, amounts(retail_revenue=120), {str(cid): '5'})
+    data = store.summary(oid, 2026)['expense_structure']
+    assert [q['status'] for q in data['quarters']] == ['no_data', 'vat_undefined', 'no_data', 'no_data']
+    assert next(i for i in data['items'] if i['category_id'] == cid)['quarter_share_percent'][1] is None
+    # При известном отрицательном налоге и отрицательной сумме проценты не выдаются.
+    store.delete_period(oid, 2026, 2)
+    store.save_period(oid, 2026, 1, amounts(retail_revenue=120, input_vat=40, cost_of_sales=50), {str(cid): '3'})
+    data = store.summary(oid, 2026)['expense_structure']
+    assert data['quarters'][0]['status'] == 'nonpositive_total' and data['quarters'][0]['total'] == D('-7.6')
+    assert all(i['quarter_share_percent'][0] is None for i in data['items'])
+
+
+def test_quarterly_share_can_be_available_even_when_year_total_is_nonpositive(tmp_path):
+    store = Store(tmp_path / 'quarterly-independent.sqlite3')
+    oid = store.create_organization('А')['id']
+    cid = store.categories(oid)[0]['id']
+    store.save_period(oid, 2026, 1, amounts(retail_revenue=120, input_vat=10, cost_of_sales=50), {str(cid): '3'})
+    store.save_period(oid, 2026, 2, amounts(retail_revenue=120, input_vat=100, cost_of_sales=50), {str(cid): '3'})
+    structure = store.summary(oid, 2026)['expense_structure']
+    assert structure['status'] == 'nonpositive_total'
+    assert [q['status'] for q in structure['quarters']] == ['ready', 'nonpositive_total', 'no_data', 'no_data']
+    item = next(i for i in structure['items'] if i['category_id'] == cid)
+    assert item['share_percent'] is None  # годовую долю выдавать нельзя
+    assert abs(item['quarter_share_percent'][0] - D('13.39285714285714285714285714285714285714')) < D('1e-36')
+    assert item['quarter_share_percent'][1] is None

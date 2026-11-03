@@ -121,6 +121,7 @@ function rawExpenseValue(summary, draft, quarter, category) {
   const value = category.quarters[quarter - 1]; return value === null || n(value) === 0 ? '' : value;
 }
 function renderSheet(summary, draft = null) {
+  closeCategoryMenu();
   let html = '';
   for (const [row, label, key, manual] of reportRows) {
     if (row === '4') html += '<tr class="group-row"><th colspan="8">ФИНАНСОВЫЙ РЕЗУЛЬТАТ</th></tr>';
@@ -138,7 +139,7 @@ function renderSheet(summary, draft = null) {
   for (const category of summary.expenses.filter((item) => !item.archived)) {
     const id = String(category.id), settings = draft?.settings?.[id] || { vat_rate: category.vat_rate ?? '', cost_type: category.cost_type };
     const source = category.source_row ? String(category.source_row) : '•';
-    html += `<tr><td><div class="label-cell"><span class="row-code">${source}</span><span class="label-name">${esc(category.name)}</span><span class="category-actions"><button class="category-action" type="button" data-archive="${id}" data-next="true" title="Скрыть статью в архив" aria-label="Скрыть статью ${esc(category.name)} в архив">Скрыть</button><button class="category-action danger-link" type="button" data-delete-category="${id}" title="Удалить статью навсегда" aria-label="Удалить статью ${esc(category.name)} навсегда">Удалить</button></span></div></td>`;
+    html += `<tr><td><div class="label-cell"><span class="row-code">${source}</span><span class="label-name">${esc(category.name)}</span><button class="category-menu-trigger" type="button" data-open-category-menu="${id}" data-archived="false" data-category-name="${esc(category.name)}" aria-haspopup="menu" aria-expanded="false" aria-controls="category-actions-menu" title="Действия со статьёй" aria-label="Действия со статьёй ${esc(category.name)}">⋮</button></div></td>`;
     html += `<td><input class="sheet-input rate-input" data-rate="${id}" inputmode="decimal" autocomplete="off" maxlength="12" value="${esc(settings.vat_rate ?? '')}" placeholder="—" aria-label="Ставка НДС: ${esc(category.name)}"></td>`;
     html += `<td><select class="sheet-select" data-kind="${id}" aria-label="Тип затрат: ${esc(category.name)}"><option value="unclassified" ${settings.cost_type === 'unclassified' ? 'selected' : ''}>Не определён</option><option value="fixed" ${settings.cost_type === 'fixed' ? 'selected' : ''}>Постоянные</option><option value="variable" ${settings.cost_type === 'variable' ? 'selected' : ''}>Переменные</option></select></td>`;
     for (let q = 1; q <= 4; q++) html += `<td><input class="sheet-input" data-expense="${id}" data-quarter="${q}" inputmode="decimal" autocomplete="off" maxlength="32" value="${esc(rawExpenseValue(summary, draft, q, category))}" placeholder="—" aria-label="${esc(category.name)}, ${q} квартал"></td>`;
@@ -152,7 +153,7 @@ function renderArchive(summary) {
   $('#archive-count').textContent = archived.length;
   $('#toggle-archive').setAttribute('aria-expanded', String(state.showArchive));
   $('#archive-panel').classList.toggle('hidden', !state.showArchive);
-  $('#archive-list').innerHTML = archived.length ? archived.map((item) => `<div class="archive-item"><div><strong>${esc(item.name)}</strong><span>За ${summary.year} год: ${summary.quarter_count ? esc(money(item.total, true)) : 'нет данных'}</span></div><div class="archive-actions"><button type="button" class="button button-light" data-archive="${item.id}" data-next="false">Восстановить</button><button type="button" class="button button-danger-quiet" data-delete-category="${item.id}">Удалить навсегда</button></div></div>`).join('') : '<p>Скрытых статей пока нет.</p>';
+  $('#archive-list').innerHTML = archived.length ? archived.map((item) => `<div class="archive-item"><div><strong>${esc(item.name)}</strong><span>За ${summary.year} год: ${summary.quarter_count ? esc(money(item.total, true)) : 'нет данных'}</span></div><button class="category-menu-trigger" type="button" data-open-category-menu="${item.id}" data-archived="true" data-category-name="${esc(item.name)}" aria-haspopup="menu" aria-expanded="false" aria-controls="category-actions-menu" title="Действия со статьёй" aria-label="Действия со статьёй ${esc(item.name)}">⋮</button></div>`).join('') : '<p>Скрытых статей пока нет.</p>';
 }
 
 function collect() {
@@ -293,129 +294,78 @@ function renderAnalysisTable(s) {
 const COLORS = { green: '#176e50', light: '#70a58b', yellow: '#a87808', grid: '#dce7df', red: '#b0443d', blue: '#367c76' };
 function chartOptions() {
   return { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
-    plugins: { legend: { position: 'bottom', align: 'start', labels: { boxWidth: 9, boxHeight: 9, padding: 17, color: '#345246', font: { size: 20, family: 'Segoe UI, Arial' }, usePointStyle: true, pointStyle: 'circle' } },
-      tooltip: { backgroundColor: '#284c3c', padding: 14, cornerRadius: 7, titleFont: { size: 24 }, bodyFont: { size: 24 }, callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${money(ctx.dataset.original?.[ctx.dataIndex] ?? ctx.raw, true)}` } } },
-    scales: { x: { grid: { display: false }, border: { display: false }, ticks: { color: '#435f51', font: { size: 20 } } },
-      y: { grid: { color: COLORS.grid }, border: { display: false }, ticks: { color: '#435f51', font: { size: 20 }, maxTicksLimit: 5, callback: (value) => compact(value) } } } };
+    plugins: { legend: { position: 'bottom', align: 'start', labels: { boxWidth: 9, boxHeight: 9, padding: 17, color: '#345246', font: { size: 15, family: 'Segoe UI, Arial' }, usePointStyle: true, pointStyle: 'circle' } },
+      tooltip: { backgroundColor: '#284c3c', padding: 14, cornerRadius: 7, titleFont: { size: 18 }, bodyFont: { size: 18 }, callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${money(ctx.dataset.original?.[ctx.dataIndex] ?? ctx.raw, true)}` } } },
+    scales: { x: { grid: { display: false }, border: { display: false }, ticks: { color: '#435f51', font: { size: 15 } } },
+      y: { grid: { color: COLORS.grid }, border: { display: false }, ticks: { color: '#435f51', font: { size: 15 }, maxTicksLimit: 5, callback: (value) => compact(value) } } } };
 }
 function dataset(label, original, color, extra = {}) { return { label, original, data: original.map(n), backgroundColor: color, borderColor: color, borderRadius: 4, maxBarThickness: 30, ...extra }; }
-function plot(id, config, hasData) {
-  const canvas = $(`#${id}`), empty = $(`#${id}-empty`);
-  if (state.charts[id]) { state.charts[id].destroy(); delete state.charts[id]; }
-  canvas.classList.toggle('hidden', !hasData); empty.classList.toggle('hidden', hasData);
-  if (!hasData) return;
-  if (typeof Chart === 'undefined') { empty.textContent = 'Не удалось загрузить график.'; empty.classList.remove('hidden'); return; }
-  state.charts[id] = new Chart(canvas, config);
-}
 function expenseKey(item) { return item.kind === 'category' ? `category:${item.category_id}` : item.kind; }
-function expenseLabel(item) {
-  const rate = item.kind === 'category' && item.vat_rate !== null ? ` · НДС ${item.vat_rate}%` : '';
-  return `${item.name}${rate}${item.archived ? ' · архив' : ''}`;
+const EXPENSE_COLORS = ['#a87808', '#176e50', '#3763a8', '#a7463d', '#7950a0', '#087e7c', '#a95428', '#557927', '#9b3d7c', '#48647c', '#aa7610', '#2d7188'];
+function expenseColor(item) {
+  let hash = 0; for (const char of expenseKey(item)) hash = (Math.imul(hash, 31) + char.charCodeAt(0)) >>> 0;
+  return EXPENSE_COLORS[hash % EXPENSE_COLORS.length];
 }
 function expenseSorted(s) {
   return [...s.expense_structure.items].sort((a, b) => Math.abs(n(b.amount) || 0) - Math.abs(n(a.amount) || 0));
 }
-const expenseValueLabels = {
-  id: 'expenseValueLabels',
-  afterDatasetsDraw(chart) {
-    const { ctx, chartArea } = chart, values = chart.data.datasets[0].data;
-    ctx.save(); ctx.fillStyle = '#214c3b'; ctx.font = '600 20px "Segoe UI", Arial'; ctx.textBaseline = 'middle';
-    chart.getDatasetMeta(0).data.forEach((bar, index) => {
-      const value = values[index]; if (value === null || !Number.isFinite(value)) return;
-      const label = `${fixed(value)}%`, width = ctx.measureText(label).width;
-      const desired = value < 0 ? bar.x - width - 8 : bar.x + 8;
-      const x = Math.max(chartArea.left, Math.min(desired, chart.width - width - 5));
-      ctx.fillText(label, x, bar.y);
-    });
-    ctx.restore();
-  },
-};
 function renderExpenseChart(s) {
   const context = `${s.organization.id}:${s.year}`;
   if (state.expenseContext !== context) { state.expenseContext = context; state.expenseTouched = false; state.expenseSelection.clear(); }
   const items = expenseSorted(s);
   if (!state.expenseTouched) {
-    // По умолчанию не более десяти крупных статей плюс оба налога с ненулевым значением.
-    const defaults = items.filter((item) => n(item.amount) !== 0 && item.kind === 'category').slice(0, 10);
-    defaults.push(...items.filter((item) => item.kind !== 'category' && item.amount !== null && n(item.amount) !== 0));
+    // Прежний выбор по умолчанию: крупнейшие статьи и оба налога; всё можно переключить слева.
+    const nonzero = (item) => item.quarter_amounts.some((value) => value !== null && n(value) !== 0);
+    const defaults = items.filter((item) => item.kind === 'category' && nonzero(item)).slice(0, 10);
+    defaults.push(...items.filter((item) => item.kind !== 'category' && nonzero(item)));
     state.expenseSelection = new Set(defaults.map(expenseKey));
   }
   $('#expense-choices').innerHTML = items.map((item) => {
     const key = expenseKey(item), checked = state.expenseSelection.has(key) ? 'checked' : '';
-    const amount = !s.quarter_count ? 'нет данных' : item.amount === null ? '#ДЕЛ/0!' : money(item.amount, true);
-    const share = item.share_percent === null ? 'доля не определена' : `${fixed(item.share_percent)}%`;
-    return `<label class="expense-choice"><input type="checkbox" data-expense-choice="${esc(key)}" ${checked}><span><strong>${esc(expenseLabel(item))}</strong><small>${esc(amount)} · ${esc(share)}</small></span></label>`;
+    return `<label class="expense-choice"><input type="checkbox" data-expense-choice="${esc(key)}" ${checked}><span class="expense-series-dot" aria-hidden="true" style="--series-color:${expenseColor(item)}"></span><span class="expense-choice-name">${esc(item.name)}</span></label>`;
   }).join('');
-  const structure = s.expense_structure;
-  let message = 'Знаменатель: все статьи затрат + НДС к уплате + налог на прибыль; себестоимость реализации не входит. Выбор флажков только скрывает столбцы, знаменатель и проценты остальных статей не меняются. Архивные суммы сохраняются. Из-за округления показанные доли могут в сумме немного отличаться от 100%.';
-  if (structure.status === 'ready') message = `Общая сумма для долей: ${money(structure.total, true)}; ` + message;
-  else if (structure.status === 'vat_undefined') message = 'Доли не определены: НДС к уплате содержит #ДЕЛ/0!. ' + message;
-  else if (structure.status === 'nonpositive_total') message = `Доли не определены: общая сумма ${money(structure.total, true)} не положительна. ` + message;
-  else message = 'Нет сохранённых или заполненных кварталов. ' + message;
-  $('#expense-denominator').textContent = message;
+  const periods = s.expense_structure.quarters.map((q) => {
+    const detail = q.status === 'ready' ? money(q.total, true) : q.status === 'vat_undefined' ? 'НДС #ДЕЛ/0!' : q.status === 'nonpositive_total' ? 'сумма неположительна' : 'нет данных';
+    return `${q.quarter} кв.: ${detail}`;
+  }).join(' · ');
+  $('#expense-denominator').textContent = `Общая сумма для долей каждого квартала: ${periods}. Знаменатель — все статьи затрат, НДС к уплате и налог на прибыль; себестоимость реализации не входит. Выбор линий не меняет знаменатель. Архивные суммы сохраняются. При неопределённом НДС или неположительной сумме доли недоступны.`;
   updateExpensePlot(s);
 }
 function updateExpensePlot(s) {
   const structure = s.expense_structure;
-  const chosen = expenseSorted(s).filter((item) => state.expenseSelection.has(expenseKey(item)) && item.amount !== null && n(item.amount) !== 0);
-  const canPlot = structure.status === 'ready' && chosen.length > 0;
-  const canvas = $('#expense-chart'), empty = $('#expense-chart-empty'), area = $('#expense-plot-area');
+  const chosen = expenseSorted(s).filter((item) => state.expenseSelection.has(expenseKey(item)));
+  const datasets = chosen.map((item) => dataset(item.name, item.quarter_amounts, expenseColor(item), {
+    data: item.quarter_share_percent.map(n), expenseKey: expenseKey(item),
+    borderWidth: 2.5, pointRadius: 4, pointHoverRadius: 6, tension: .2, fill: false, spanGaps: false,
+  }));
+  const canPlot = datasets.some((line) => line.data.some((value) => value !== null && Number.isFinite(value)));
+  const canvas = $('#expense-chart'), empty = $('#expense-chart-empty');
   if (!canPlot) {
     if (state.charts['expense-chart']) { state.charts['expense-chart'].destroy(); delete state.charts['expense-chart']; }
-    canvas.classList.add('hidden'); empty.classList.remove('hidden'); area.style.height = '320px';
-    empty.textContent = structure.status === 'vat_undefined' ? 'НДС не определён (#ДЕЛ/0!), поэтому доли не рассчитываются.' : structure.status === 'nonpositive_total' ? 'Общая сумма для долей не положительна.' : structure.status === 'no_data' ? 'Введите данные, чтобы увидеть структуру.' : 'Выберите хотя бы одну ненулевую статью или налог.';
+    canvas.classList.add('hidden'); empty.classList.remove('hidden');
+    const hasPeriods = structure.quarters.some((quarter) => quarter.status !== 'no_data');
+    const hasReady = structure.quarters.some((quarter) => quarter.status === 'ready');
+    empty.textContent = !hasPeriods ? 'Введите данные, чтобы увидеть график.' : !hasReady ? 'Доли не определены: НДС содержит #ДЕЛ/0! или общая сумма затрат с налогами не положительна.' : !chosen.length ? 'Выберите статью или налог слева.' : 'Для выбранных статей нет доступных значений.';
     return;
   }
   if (typeof Chart === 'undefined') { canvas.classList.add('hidden'); empty.classList.remove('hidden'); empty.textContent = 'Не удалось загрузить график.'; return; }
   canvas.classList.remove('hidden'); empty.classList.add('hidden');
-  // Область с прокруткой не растягивает страницу при большом числе статей.
-  area.style.height = `${Math.min(30000, Math.max(320, chosen.length * 55 + 90))}px`;
-  const labels = chosen.map((item) => {
-    const suffix = item.kind === 'category' && item.vat_rate !== null ? ` · ${item.vat_rate}%` : '';
-    const maxLabel = window.innerWidth <= 760 ? 10 : 25;
-    const maxName = Math.max(4, maxLabel - suffix.length), name = item.name.length > maxName ? `${item.name.slice(0, maxName - 1)}…` : item.name;
-    return `${name}${suffix}`;
-  });
-  const amounts = chosen.map((item) => item.amount), shares = chosen.map((item) => n(item.share_percent));
-  const data = dataset('Доля в общей сумме', amounts, COLORS.green, {
-    data: shares, names: chosen.map(expenseLabel),
-    backgroundColor: chosen.map((item) => n(item.amount) < 0 ? COLORS.red : COLORS.green), maxBarThickness: 29,
-  });
+  const labels = ['1 кв.', '2 кв.', '3 кв.', '4 кв.'];
   if (state.charts['expense-chart']) {
-    const chart = state.charts['expense-chart']; chart.data.labels = labels; chart.data.datasets = [data]; chart.resize(); chart.update(); return;
+    const chart = state.charts['expense-chart']; chart.data.labels = labels; chart.data.datasets = datasets; chart.update(); return;
   }
-  const options = chartOptions(); options.indexAxis = 'y'; options.plugins.legend.display = false;
-  // Та же длительность и easing, что у стандартной анимации графика чистой прибыли Chart.js.
+  const options = chartOptions(); options.plugins.legend.display = false;
+  // Та же длительность и easing, что у анимации линии чистой прибыли Chart.js.
   options.animation = { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1000, easing: 'easeOutQuart' };
   options.interaction = { mode: 'nearest', intersect: true };
-  options.layout = { padding: { right: 80 } };
-  options.plugins.tooltip.callbacks.label = (ctx) => ` ${ctx.dataset.names[ctx.dataIndex]}: ${fixed(ctx.raw)}% · ${money(ctx.dataset.original[ctx.dataIndex], true)}`;
-  options.scales = {
-    x: { grid: { color: COLORS.grid }, border: { display: false }, ticks: { color: '#435f51', font: { size: 20 }, maxTicksLimit: 5, callback: (value) => `${fixed(value, 0)}%` } },
-    y: { grid: { display: false }, border: { display: false }, ticks: { color: '#345246', font: { size: 20 }, autoSkip: false } },
-  };
-  state.charts['expense-chart'] = new Chart(canvas, { type: 'bar', data: { labels, datasets: [data] }, options, plugins: [expenseValueLabels] });
-}
-function renderCharts(s) {
-  const qValues = (key, group = 'metrics') => s.quarters.map((q) => q[group]?.[key] ?? null);
-  const labels = ['1 кв.', '2 кв.', '3 кв.', '4 кв.'];
-  plot('quarter-chart', { type: 'bar', data: { labels, datasets: [
-    dataset('Выручка с НДС', qValues('revenue'), COLORS.green), dataset('Себестоимость и затраты', qValues('total_costs'), COLORS.light),
-    dataset('Чистая прибыль', qValues('net_profit'), COLORS.yellow, { type: 'line', borderWidth: 2.5, pointRadius: 4, tension: .2, fill: false, spanGaps: false }),
-  ] }, options: chartOptions() }, s.quarter_count > 0);
-  const breakValues = qValues('break_even_revenue', 'analysis');
-  plot('break-even-chart', { type: 'bar', data: { labels, datasets: [
-    dataset('Выручка без НДС', qValues('revenue_without_vat'), COLORS.green), dataset('Точка безубыточности', breakValues, COLORS.yellow),
-  ] }, options: chartOptions() }, breakValues.some((value) => value !== null));
-  renderExpenseChart(s);
-  const history = s.history, values = (key) => history.map((item) => item.annual[key]);
-  const line = (label, key, color) => dataset(label, values(key), color, { borderWidth: 2, pointRadius: 4, tension: .2, fill: false });
-  plot('history-chart', { type: 'line', data: { labels: history.map((item) => `${item.year}${item.count < 4 ? ` · ${item.count}/4` : ''}`), datasets: [line('Выручка с НДС', 'revenue', COLORS.green), line('Затраты', 'total_costs', COLORS.blue), line('Чистая прибыль', 'net_profit', COLORS.yellow)] }, options: chartOptions() }, history.length > 0);
-  plot('tax-chart', { type: 'bar', data: { labels, datasets: [dataset('Итого НДС', qValues('output_vat'), COLORS.light), dataset('Налог НДС', qValues('vat_due'), COLORS.green), dataset('Налог на прибыль', qValues('profit_tax'), COLORS.yellow)] }, options: chartOptions() }, s.quarter_count > 0);
+  options.plugins.tooltip.callbacks.label = (ctx) => ` ${ctx.dataset.label}: ${fixed(ctx.raw)}% · ${money(ctx.dataset.original[ctx.dataIndex], true)}`;
+  options.scales.y.beginAtZero = true;
+  options.scales.y.ticks.callback = (value) => `${fixed(value, 2, true)}%`;
+  state.charts['expense-chart'] = new Chart(canvas, { type: 'line', data: { labels, datasets }, options });
 }
 function renderResults(summary) {
   updateSheetValues(summary); renderStats(summary); renderAssessment(summary); renderAnalysisTable(summary);
-  requestAnimationFrame(() => { if (state.view === summary) renderCharts(summary); });
+  requestAnimationFrame(() => { if (state.view === summary) renderExpenseChart(summary); });
 }
 function openOrganization(mode) {
   if (!confirmDiscard()) return;
@@ -475,7 +425,54 @@ async function changeCategoryArchive(id, archived) {
     await refresh(); toast(archived ? 'Статья скрыта в архиве; история сохранена.' : 'Статья восстановлена.');
   } finally { state.categoryChanging = false; $('#application').inert = false; }
 }
+let activeCategoryMenuTrigger = null;
+function closeCategoryMenu(restoreFocus = false) {
+  const trigger = activeCategoryMenuTrigger;
+  if (trigger) trigger.setAttribute('aria-expanded', 'false');
+  activeCategoryMenuTrigger = null;
+  $('#category-actions-menu').classList.add('hidden');
+  if (restoreFocus && trigger?.isConnected) trigger.focus({ preventScroll: true });
+}
+function positionCategoryMenu() {
+  const trigger = activeCategoryMenuTrigger, menu = $('#category-actions-menu');
+  if (!trigger?.isConnected) { closeCategoryMenu(); return; }
+  const target = trigger.getBoundingClientRect();
+  if (target.bottom < 0 || target.top > innerHeight || target.right < 0 || target.left > innerWidth) { closeCategoryMenu(); return; }
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(8, Math.min(target.right - rect.width, innerWidth - rect.width - 8));
+  const below = target.bottom + 4;
+  const top = below + rect.height <= innerHeight - 8 ? below : Math.max(8, target.top - rect.height - 4);
+  menu.style.left = `${left}px`; menu.style.top = `${top}px`;
+}
+function openCategoryMenu(trigger) {
+  if (trigger === activeCategoryMenuTrigger) { closeCategoryMenu(); return; }
+  closeCategoryMenu();
+  const id = Number(trigger.dataset.openCategoryMenu), archived = trigger.dataset.archived === 'true';
+  const menu = $('#category-actions-menu');
+  menu.setAttribute('aria-label', `Действия со статьёй ${trigger.dataset.categoryName}`);
+  menu.innerHTML = `<button type="button" role="menuitem" data-archive="${id}" data-next="${archived ? 'false' : 'true'}">${archived ? 'Восстановить' : 'Скрыть в архив'}</button><button type="button" role="menuitem" class="danger-link" data-delete-category="${id}">Удалить навсегда</button>`;
+  menu.style.visibility = 'hidden'; menu.classList.remove('hidden');
+  activeCategoryMenuTrigger = trigger; trigger.setAttribute('aria-expanded', 'true');
+  positionCategoryMenu(); menu.style.visibility = '';
+  menu.querySelector('button')?.focus({ preventScroll: true });
+}
+window.addEventListener('scroll', () => { if (activeCategoryMenuTrigger) positionCategoryMenu(); }, true);
+window.addEventListener('resize', () => { if (activeCategoryMenuTrigger) positionCategoryMenu(); });
+document.addEventListener('keydown', (event) => {
+  if (!activeCategoryMenuTrigger) return;
+  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeCategoryMenu(true); return; }
+  if (event.key === 'Tab') { setTimeout(() => closeCategoryMenu(), 0); return; }
+  if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+    event.preventDefault();
+    const buttons = [...$('#category-actions-menu').querySelectorAll('button')], current = buttons.indexOf(document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+    buttons[next]?.focus({ preventScroll: true });
+  }
+});
 document.addEventListener('click', (event) => {
+  const menuTrigger = event.target.closest('[data-open-category-menu]');
+  if (menuTrigger) { openCategoryMenu(menuTrigger); return; }
+  if (!event.target.closest('#category-actions-menu')) closeCategoryMenu();
   const close = event.target.closest('[data-close-dialog]'); if (close) { $(`#${close.dataset.closeDialog}`).close(); return; }
   const fill = event.target.closest('[data-fill-quarter]');
   if (fill) {
@@ -490,9 +487,12 @@ document.addEventListener('click', (event) => {
     api('/api/period', { method: 'DELETE', body: { organization_id: state.organizationId, year: state.year, quarter: q } }).then(() => refresh()).then(() => toast('Квартал удалён.')).catch(fail); return;
   }
   const archive = event.target.closest('[data-archive]');
-  if (archive) { changeCategoryArchive(Number(archive.dataset.archive), archive.dataset.next === 'true').catch(fail); return; }
+  if (archive) {
+    const id = Number(archive.dataset.archive), archived = archive.dataset.next === 'true';
+    closeCategoryMenu(); changeCategoryArchive(id, archived).catch(fail); return;
+  }
   const deleteCategory = event.target.closest('[data-delete-category]');
-  if (deleteCategory) { openCategoryDeletion(Number(deleteCategory.dataset.deleteCategory)).catch(fail); }
+  if (deleteCategory) { const id = Number(deleteCategory.dataset.deleteCategory); closeCategoryMenu(); openCategoryDeletion(id).catch(fail); }
 });
 $('#toggle-archive').addEventListener('click', () => { state.showArchive = !state.showArchive; if (state.saved) renderArchive(state.saved); });
 $('#delete-category-confirm').addEventListener('change', () => { $('#delete-category-apply').disabled = !$('#delete-category-confirm').checked; });

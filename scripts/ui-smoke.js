@@ -82,7 +82,7 @@ async function waitForServer(url, child, logs) {
       table: getComputedStyle(document.querySelector('.sheet-table td')).fontSize,
       input: getComputedStyle(document.querySelector('.sheet-input')).fontSize,
       heading: getComputedStyle(document.querySelector('.page-heading h1')).fontSize }));
-    assert.deepStrictEqual(fonts, { body: '28px', table: '22px', input: '22px', heading: '54px' }, 'Шрифт должен быть ровно вдвое крупнее прежнего');
+    assert.deepStrictEqual(fonts, { body: '21px', table: '16.5px', input: '16.5px', heading: '40.5px' }, 'Шрифты должны быть на 25% меньше версии 3.0');
 
     await page.locator('#year-input').fill('2030');
     await page.locator('#year-input').press('Tab');
@@ -101,6 +101,11 @@ async function waitForServer(url, child, logs) {
     await categoryRow.waitFor({ state: 'visible' });
     assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '120');
     await categoryRow.locator('[data-expense][data-quarter="1"]').fill('3');
+    await page.locator('[data-fill-quarter="2"]').click();
+    await page.locator('[data-input="retail_revenue"][data-quarter="2"]').fill('120');
+    await page.locator('[data-input="input_vat"][data-quarter="2"]').fill('10');
+    await page.locator('[data-input="cost_of_sales"][data-quarter="2"]').fill('50');
+    await categoryRow.locator('[data-expense][data-quarter="2"]').fill('6');
     await page.waitForFunction(() => document.querySelector('[data-metric="net_profit"][data-quarter="1"]').textContent.replace(/\s/g, '') === '37,60');
     const breakEvenRow = page.locator('#analysis-body tr').filter({ hasText: 'Точка безубыточности' });
     await page.waitForFunction(() => [...document.querySelectorAll('#analysis-body tr')].some((r) => r.textContent.includes('Точка безубыточности') && r.cells[1].textContent.trim() === '6,00'));
@@ -108,28 +113,52 @@ async function waitForServer(url, child, logs) {
     assert((await page.locator('#deduction-note').innerText()).includes('H17'));
     await page.locator('#year-form button[type="submit"]').first().click();
     await page.waitForFunction(() => document.querySelector('#q-status-1').textContent === 'сохранён');
-    assert.strictEqual(await page.locator('#q-status-2').innerText(), 'нет данных');
-    assert(await page.locator('#break-even-chart').isVisible(), 'График порога должен появиться');
+    assert.strictEqual(await page.locator('#q-status-2').innerText(), 'сохранён');
+    assert.strictEqual(await page.locator('canvas').count(), 1, 'На странице должен остаться только график статей затрат');
+    assert.strictEqual(await page.locator('#quarter-chart, #break-even-chart, #history-chart, #tax-chart').count(), 0);
     await page.waitForFunction(() => document.querySelector('#expense-chart') && !document.querySelector('#expense-chart').classList.contains('hidden'));
     assert.strictEqual((await page.locator('[data-metric="non_vat_deduction"][data-quarter="1"]').innerText()).trim(), '0,00');
     const choice = page.locator('.expense-choice').filter({ hasText: 'Реклама — тест' });
-    assert((await choice.innerText()).includes('13,39%'), 'Доля статьи учитывает НДС и налог на прибыль, но не себестоимость');
-    assert((await page.locator('.expense-choice').filter({ hasText: 'Налог НДС' }).innerText()).includes('44,64%'));
-    assert((await page.locator('.expense-choice').filter({ hasText: 'Налог на прибыль' }).innerText()).includes('41,96%'));
+    assert.strictEqual((await choice.innerText()).trim(), 'Реклама — тест', 'Слева только название, без ставки, суммы и процента');
+    assert.strictEqual((await page.locator('.expense-choice').filter({ hasText: 'Налог НДС' }).innerText()).trim(), 'Налог НДС');
+    assert.strictEqual((await page.locator('.expense-choice').filter({ hasText: 'Налог на прибыль' }).innerText()).trim(), 'Налог на прибыль');
     const denominator = await page.locator('#expense-denominator').innerText();
-    assert(denominator.includes('22,40') && denominator.includes('себестоимость реализации не входит'));
-    const configuration = await page.evaluate(() => { const c = Chart.getChart(document.querySelector('#expense-chart'));
-      return { horizontal: c.options.indexAxis, duration: c.options.animation.duration, tick: c.options.scales.x.ticks.font.size, labels: c.data.labels.length }; });
-    assert.deepStrictEqual(configuration, { horizontal: 'y', duration: 1000, tick: 20, labels: 3 });
+    assert(denominator.includes('1 кв.: 22,40') && denominator.includes('2 кв.: 24,80') && denominator.includes('себестоимость реализации не входит'));
+    const configuration = await page.evaluate(() => {
+      const c = Chart.getChart(document.querySelector('#expense-chart'));
+      const line = c.data.datasets.find((d) => d.label === 'Реклама — тест');
+      return { type: c.config.type, duration: c.options.animation.duration, tick: c.options.scales.y.ticks.font.size,
+        labels: c.data.labels, names: c.data.datasets.map((d) => d.label), values: line.data,
+        tooltip: c.options.plugins.tooltip.callbacks.label({ dataset: line, dataIndex: 0, raw: line.data[0] }) };
+    });
+    assert.strictEqual(configuration.type, 'line');
+    assert.strictEqual(configuration.duration, 1000);
+    assert.strictEqual(configuration.tick, 15);
+    assert.deepStrictEqual(configuration.labels, ['1 кв.', '2 кв.', '3 кв.', '4 кв.']);
+    assert.deepStrictEqual(new Set(configuration.names), new Set(['Реклама — тест', 'Налог НДС', 'Налог на прибыль']));
+    assert(Math.abs(configuration.values[0] - 3 / 22.4 * 100) < 1e-9);
+    assert(Math.abs(configuration.values[1] - 6 / 24.8 * 100) < 1e-9);
+    assert.strictEqual(configuration.values[2], null);
+    assert(configuration.tooltip.includes('13,39%') && configuration.tooltip.includes('3,00'), 'В подсказке доля и сумма выбранного квартала');
     await page.locator('[data-expense-choice="vat"]').uncheck();
     assert.strictEqual(await page.locator('#expense-denominator').innerText(), denominator, 'Скрытие статьи не должно менять знаменатель');
-    assert((await choice.innerText()).includes('13,39%'), 'Проценты остальных статей не пересчитываются');
-    assert.strictEqual(await page.evaluate(() => Chart.getChart(document.querySelector('#expense-chart')).data.labels.length), 2);
+    const afterHide = await page.evaluate(() => { const c = Chart.getChart(document.querySelector('#expense-chart')); return { count: c.data.datasets.length, values: c.data.datasets.find((d) => d.label === 'Реклама — тест').data }; });
+    assert.strictEqual(afterHide.count, 2);
+    assert.deepStrictEqual(afterHide.values, configuration.values, 'Проценты остальных статей не пересчитываются');
+    await page.locator('#expense-select-none').click();
+    assert(await page.locator('#expense-chart').isHidden());
+    await choice.locator('input').check();
     await page.locator('[data-expense-choice="vat"]').check();
+    await page.locator('[data-expense-choice="profit_tax"]').check();
+    assert.strictEqual(await page.evaluate(() => Chart.getChart(document.querySelector('#expense-chart')).data.datasets.length), 3);
     await page.setViewportSize({ width: 390, height: 844 });
     await page.waitForFunction(() => { const plot = document.querySelector('.expense-chart-scroll'); return plot.scrollWidth <= plot.clientWidth; });
     assert(await page.locator('#expense-chart').isVisible(), 'График долей должен помещаться на мобильном экране');
     assert.deepStrictEqual(await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]), [390, 390]);
+    await categoryRow.locator('[data-open-category-menu]').click();
+    const mobileMenu = await page.locator('#category-actions-menu').boundingBox();
+    assert(mobileMenu && mobileMenu.x >= 0 && mobileMenu.x + mobileMenu.width <= 390 && mobileMenu.y >= 0 && mobileMenu.y + mobileMenu.height <= 844, 'Меню должно помещаться в мобильном окне');
+    await page.keyboard.press('Escape');
     await page.setViewportSize({ width: 1360, height: 900 });
 
     // Два окна не должны молча перезаписывать друг друга.
@@ -207,8 +236,23 @@ async function waitForServer(url, child, logs) {
       assert((await page.locator('#import-summary').innerText()).includes('1, 2, 3'));
       await page.locator('[data-close-dialog="import-dialog"]').first().click();
     }
-    // Архив скрывает строку, сохранение другого показателя не стирает историю.
-    await categoryRow.locator('[data-archive]').click();
+    // Действия статьи — в выпадающем меню с доступом с клавиатуры.
+    const openMenu = async (row) => { await row.locator('[data-open-category-menu]').click(); await page.locator('#category-actions-menu').waitFor({ state: 'visible' }); };
+    const chooseMenu = async (row, action) => { await openMenu(row); await page.locator(`#category-actions-menu ${action}`).click(); };
+    assert.strictEqual(await categoryRow.locator('[data-archive], [data-delete-category]').count(), 0);
+    const trigger = categoryRow.locator('[data-open-category-menu]');
+    await openMenu(categoryRow);
+    assert.strictEqual(await trigger.getAttribute('aria-expanded'), 'true');
+    assert((await page.locator('#category-actions-menu').innerText()).includes('Скрыть в архив'));
+    assert((await page.locator('#category-actions-menu').innerText()).includes('Удалить навсегда'));
+    await page.keyboard.press('Escape');
+    assert(await page.locator('#category-actions-menu').isHidden());
+    assert.strictEqual(await trigger.getAttribute('aria-expanded'), 'false');
+    await trigger.press('Enter');
+    await page.keyboard.press('ArrowDown');
+    assert(await page.locator('#category-actions-menu [data-delete-category]').evaluate((el) => el === document.activeElement));
+    await page.keyboard.press('ArrowUp');
+    await page.keyboard.press('Enter');  // скрыть, подтверждение обрабатывается тестом
     await page.waitForFunction(() => document.querySelector('#archive-count').textContent === '1');
     assert.strictEqual(await categoryRow.count(), 0, 'Архивная строка должна быть скрыта');
     await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('121');
@@ -218,21 +262,22 @@ async function waitForServer(url, child, logs) {
     await page.waitForFunction(() => document.querySelector('#q-status-1').textContent === 'сохранён');
     await page.locator('#toggle-archive').click();
     const archived = page.locator('.archive-item').filter({ hasText: 'Реклама — тест' });
-    assert((await archived.innerText()).includes('3,00'));
-    await archived.locator('[data-archive]').click();
+    assert((await archived.innerText()).includes('9,00'));
+    await chooseMenu(archived, '[data-archive]');
     await categoryRow.waitFor({ state: 'visible' });
     assert.strictEqual(await categoryRow.locator('[data-expense][data-quarter="1"]').inputValue(), '3');
+    assert.strictEqual(await categoryRow.locator('[data-expense][data-quarter="2"]').inputValue(), '6');
     // Скрыть снова, затем увидеть все затронутые годы перед отдельным удалением.
-    await categoryRow.locator('[data-archive]').click();
+    await chooseMenu(categoryRow, '[data-archive]');
     await page.waitForFunction(() => document.querySelector('#archive-count').textContent === '1');
-    await archived.locator('[data-delete-category]').click();
+    await chooseMenu(archived, '[data-delete-category]');
     await page.locator('#delete-category-dialog').waitFor({ state: 'visible' });
     const impact = await page.locator('#delete-category-impact').innerText();
     assert(impact.includes('2030') && impact.includes('2031'), `Должны быть перечислены все годы: ${impact}`);
     assert(await page.locator('#delete-category-apply').isDisabled());
     await page.locator('[data-close-dialog="delete-category-dialog"]').first().click();
     assert.strictEqual(await page.locator('#archive-count').innerText(), '1');
-    await archived.locator('[data-delete-category]').click();
+    await chooseMenu(archived, '[data-delete-category]');
     await page.locator('#delete-category-confirm').check();
     await page.locator('#delete-category-apply').click();
     await page.locator('#delete-category-dialog').waitFor({ state: 'hidden' });
@@ -250,12 +295,12 @@ async function waitForServer(url, child, logs) {
     await page.waitForFunction(() => document.querySelector('[data-metric="non_vat_deduction"][data-quarter="2"]').textContent === '#ДЕЛ/0!');
     const note = await page.locator('#deduction-note').innerText();
     assert(note.includes('1,00') && note.includes('#ДЕЛ/0!') && note.includes('сумма квартальных вычетов'));
-    assert((await page.locator('#expense-denominator').innerText()).includes('НДС к уплате содержит #ДЕЛ/0!'));
+    assert((await page.locator('#expense-denominator').innerText()).includes('2 кв.: НДС #ДЕЛ/0!'));
     await page.setViewportSize({ width: 390, height: 844 });
     const sizes = await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]);
     assert(sizes[0] <= sizes[1], `Мобильная страница переполнена: ${sizes}`);
     assert.deepStrictEqual(errors, [], `Ошибки браузера: ${errors.join('; ')}`);
-    console.log('UI smoke: вычеты, шрифты 2×, выбор долей и налоги, архив/восстановление/удаление, XLSX, конкуренция и мобильный экран — OK.');
+    console.log('UI smoke: шрифты −25%, квартальные линии и проценты, выпадающее меню, архив/удаление, XLSX, конкуренция и мобильный экран — OK.');
   } finally {
     if (browser) await browser.close();
     if (child.exitCode === null) {

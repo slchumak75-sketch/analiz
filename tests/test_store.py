@@ -231,3 +231,32 @@ def test_concurrent_initialization_is_atomic(tmp_path):
         assert con.execute("SELECT COUNT(*) FROM pragma_table_info('periods') WHERE name='legacy_manual_deduction'").fetchone()[0] == 1
     oid = instances[0].create_organization('После параллельного запуска')['id']
     assert instances[-1].summary(oid, 2026)['organization']['name'] == 'После параллельного запуска'
+
+
+def test_wal_setup_retries_transient_lock_but_not_other_errors(monkeypatch):
+    import analiz.store as store_module
+    monkeypatch.setattr(store_module.time, 'sleep', lambda _: None)
+
+    class Cursor:
+        def fetchone(self):
+            return ('wal',)
+
+    class BusyConnection:
+        def __init__(self, error, fails):
+            self.error = error
+            self.fails = fails
+            self.calls = 0
+        def execute(self, statement):
+            assert statement == 'PRAGMA journal_mode = WAL'
+            self.calls += 1
+            if self.calls <= self.fails:
+                raise sqlite3.OperationalError(self.error)
+            return Cursor()
+
+    transient = BusyConnection('database is locked', 2)
+    Store._enable_wal(transient)
+    assert transient.calls == 3
+    permanent = BusyConnection('attempt to write a readonly database', 1)
+    with pytest.raises(sqlite3.OperationalError, match='readonly'):
+        Store._enable_wal(permanent)
+    assert permanent.calls == 1

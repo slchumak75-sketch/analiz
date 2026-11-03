@@ -61,32 +61,49 @@ def period_analysis(metrics: Mapping[str, Decimal | None], expenses: Mapping[int
 
 
 def expense_structure(expenses: list[dict[str, Any]], annual: Mapping[str, Decimal | None],
-                      *, has_periods: bool) -> dict[str, Any]:
-    """Доли статей и двух налогов без себестоимости реализации (решение владельца).
+                      quarters: list[dict[str, Any]], *, has_periods: bool) -> dict[str, Any]:
+    """Доли статей и двух налогов за год и каждый квартал без себестоимости.
 
-    Налоговые показатели берутся со знаком. Они добавляются только для анализа;
-    формулы прибыли и безубыточности остаются без изменений.
+    На каждом квартале свой общий знаменатель, не зависящий от фильтра графика.
+    Налоговые показатели берутся со знаком; прибыль и безубыточность не меняются.
     """
+    if len(quarters) != 4:
+        raise ValueError("Для структуры затрат нужны четыре квартала.")
+
+    def denominator(metrics: Mapping[str, Decimal | None] | None) -> tuple[str, Decimal | None]:
+        if metrics is None:
+            return "no_data", None
+        total = metrics["expense_tax_total"]
+        if metrics["vat_due"] is None:
+            return "vat_undefined", None
+        if total is None or total <= ZERO:
+            return "nonpositive_total", total
+        return "ready", total
+
     with localcontext() as context:
         context.prec = 40
         items = [{"kind": "category", "category_id": item["id"], "name": item["name"],
-                  "vat_rate": item["vat_rate"], "amount": item["total"], "archived": bool(item["archived"])}
+                  "vat_rate": item["vat_rate"], "amount": item["total"],
+                  "quarter_amounts": list(item["quarters"]), "archived": bool(item["archived"])}
                  for item in expenses]
         items.extend([
-            {"kind": "vat", "category_id": None, "name": "Налог НДС", "vat_rate": None, "amount": annual["vat_due"]},
-            {"kind": "profit_tax", "category_id": None, "name": "Налог на прибыль", "vat_rate": None, "amount": annual["profit_tax"]},
+            {"kind": "vat", "category_id": None, "name": "Налог НДС", "vat_rate": None,
+             "amount": annual["vat_due"],
+             "quarter_amounts": [q["metrics"]["vat_due"] if q["metrics"] is not None else None for q in quarters]},
+            {"kind": "profit_tax", "category_id": None, "name": "Налог на прибыль", "vat_rate": None,
+             "amount": annual["profit_tax"],
+             "quarter_amounts": [q["metrics"]["profit_tax"] if q["metrics"] is not None else None for q in quarters]},
         ])
-        total = annual["expense_tax_total"] if has_periods else None
-        if not has_periods:
-            status = "no_data"
-        elif annual["vat_due"] is None:
-            status = "vat_undefined"
-        elif total is None or total <= ZERO:
-            status = "nonpositive_total"
-        else:
-            status = "ready"
+        status, total = denominator(annual if has_periods else None)
+        period_totals = [{"quarter": q["quarter"], "status": period_status, "total": period_total}
+                         for q in quarters
+                         for period_status, period_total in [denominator(q["metrics"] if q["exists"] else None)]]
         for item in items:
             amount = item["amount"]
             item["share_percent"] = amount / total * 100 if status == "ready" and amount is not None else None  # type: ignore[operator]
-        return {"total": total, "status": status, "items": items,
+            item["quarter_share_percent"] = [
+                amount / period["total"] * 100 if period["status"] == "ready" and amount is not None else None
+                for amount, period in zip(item["quarter_amounts"], period_totals)
+            ]
+        return {"total": total, "status": status, "quarters": period_totals, "items": items,
                 "includes_cost_of_sales": False}
