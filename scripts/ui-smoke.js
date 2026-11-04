@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const net = require('net');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const { chromium } = require('playwright-core');
 
 function findBrowser() {
@@ -89,10 +89,45 @@ async function assertNoHorizontalScroll(page, width) {
     await page.waitForSelector('#main-content:not(.hidden)');
     assert.strictEqual(await page.locator('#context-org').innerText(), 'Тестовая организация');
     assert.strictEqual(await page.locator('.navigation').count(), 0, 'Разделы должны быть на одной странице');
-    assert.strictEqual(await page.locator('[data-fill-quarter]').count(), 4);
+    assert.strictEqual(await page.locator('[data-fill-quarter]').count(), 12, 'В каждом разделе есть действия четырёх кварталов');
     assert.strictEqual(await page.locator('[data-input="non_vat_deduction"]').count(), 0, 'Строка вычета теперь расчётная');
     assert.strictEqual(await page.locator('[data-input="retail_revenue"]').count(), 4);
-    assert((await page.locator('.sheet-table thead').innerText()).includes('Итого за год'));
+    const sheetGroups = ['financial', 'sales', 'expenses'];
+    for (const group of sheetGroups) {
+      const header = page.locator(`[data-sheet-header="${group}"]`);
+      assert(await header.isVisible());
+      for (const name of ['Показатель / статья затрат', 'НДС, %', 'Тип затрат', '1 квартал', '2 квартал', '3 квартал', '4 квартал', 'Итого за год']) assert((await header.innerText()).includes(name), `${group}: нет ${name}`);
+      assert.strictEqual(await header.locator('th[scope="col"]').count(), 8);
+    }
+    // Шапка непосредственно под каждым открытым разделом; все восемь комбинаций независимы.
+    for (let mask = 0; mask < 8; mask++) {
+      for (const [index, group] of sheetGroups.entries()) {
+        const toggle = page.locator(`[data-panel-toggle="${group}"]`), shouldOpen = Boolean(mask & (1 << index));
+        if ((await toggle.getAttribute('aria-expanded') === 'true') !== shouldOpen) await toggle.click();
+        assert.strictEqual(await page.locator(`[data-sheet-header="${group}"]`).isVisible(), shouldOpen, `Шапка ${group}, комбинация ${mask}`);
+      }
+    }
+    // На узком экране также проверяем любую комбинацию: шапка следует за своим разделом.
+    await assertNoHorizontalScroll(page, 320);
+    for (let mask = 0; mask < 8; mask++) {
+      for (const [index, group] of sheetGroups.entries()) {
+        const toggle = page.locator(`[data-panel-toggle="${group}"]`), shouldOpen = Boolean(mask & (1 << index));
+        if ((await toggle.getAttribute('aria-expanded') === 'true') !== shouldOpen) await toggle.click();
+        const header = page.locator(`[data-sheet-header="${group}"]`);
+        assert.strictEqual(await header.isVisible(), shouldOpen, `Узкая шапка ${group}, комбинация ${mask}`);
+        if (shouldOpen) {
+          assert(await header.locator('[data-fill-quarter="4"]').isVisible());
+          assert((await header.innerText()).includes('1 квартал'));
+        }
+      }
+      await assertNoHorizontalScroll(page, 320);
+    }
+    await page.setViewportSize({ width: 1360, height: 900 });
+    assert(await page.locator('#save-status').isHidden() && await page.locator('#preview-status').isHidden());
+    assert.strictEqual(await page.locator('#deduction-note, #expense-chart-note, .sheet-note').count(), 0);
+    const unwanted = ['ПРОДАЖИ · ЗАТРАТЫ · РЕЗУЛЬТАТ', 'Таблица и вся аналитика — на одной странице', 'Локальное хранение', 'КВАРТАЛЬНЫЙ ОТЧЁТ', 'Поля ввода выделены зелёным', 'Строки и формулы соответствуют исходной таблице', 'Все изменения сохранены', 'Данные на вашем компьютере', 'Вычет по формуле H15', 'Прежние ручные вычеты (не используются в расчётах)', 'ИНТЕРПРЕТАЦИЯ РЕЗУЛЬТАТОВ', 'Показатели по введённым кварталам', 'ВЫРУЧКА БЕЗ НДС', 'Себестоимость продаж — переменная', 'Точка безубыточности = постоянные затраты', 'НАГЛЯДНАЯ КАРТИНА', 'Суммы статей и налогов по кварталам выбранного года', 'СТРУКТУРА', 'Суммы выбранных статей и налогов по кварталам, руб.', 'Показаны суммы статей, НДС к уплате'];
+    const visibleText = await page.locator('#main-content').innerText();
+    for (const text of unwanted) assert(!visibleText.includes(text), `Убрана подпись: ${text}`);
     const fonts = await page.evaluate(() => ({ body: getComputedStyle(document.body).fontSize,
       table: getComputedStyle(document.querySelector('.sheet-table td')).fontSize,
       input: getComputedStyle(document.querySelector('.sheet-input')).fontSize,
@@ -102,7 +137,7 @@ async function assertNoHorizontalScroll(page, width) {
     await page.locator('#year-input').fill('2030');
     await page.locator('#year-input').press('Tab');
     await page.waitForFunction(() => document.querySelector('#context-year').textContent.includes('2030'));
-    await page.locator('[data-fill-quarter="1"]').click();
+    await page.locator('[data-fill-quarter="1"]').first().click();
     await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('120');
     await page.locator('[data-input="input_vat"][data-quarter="1"]').fill('10');
     await page.locator('[data-input="cost_of_sales"][data-quarter="1"]').fill('50');
@@ -116,7 +151,7 @@ async function assertNoHorizontalScroll(page, width) {
     await categoryRow.waitFor({ state: 'visible' });
     assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '120');
     await categoryRow.locator('[data-expense][data-quarter="1"]').fill('3');
-    await page.locator('[data-fill-quarter="2"]').click();
+    await page.locator('[data-sheet-header="sales"] [data-fill-quarter="2"]').click();
     await page.locator('[data-input="retail_revenue"][data-quarter="2"]').fill('120');
     await page.locator('[data-input="input_vat"][data-quarter="2"]').fill('10');
     await page.locator('[data-input="cost_of_sales"][data-quarter="2"]').fill('50');
@@ -125,7 +160,17 @@ async function assertNoHorizontalScroll(page, width) {
     const breakEvenRow = page.locator('#analysis-body tr').filter({ hasText: 'Точка безубыточности' });
     await page.waitForFunction(() => [...document.querySelectorAll('#analysis-body tr')].some((r) => r.textContent.includes('Точка безубыточности') && r.cells[1].querySelector('.cell-value').textContent.trim() === '6,00'));
     assert.strictEqual((await breakEvenRow.locator('td').nth(1).innerText()).trim(), '6,00');
-    assert((await page.locator('#deduction-note').innerText()).includes('H17'));
+    assert(await page.locator('#save-status').isVisible(), 'Черновик нельзя выдать за сохранённый');
+    await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('не число');
+    await page.locator('#preview-status.error').waitFor({ state: 'visible' });
+    await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('120');
+    await page.waitForFunction(() => document.querySelector('#preview-status').classList.contains('hidden'));
+    // Кнопка из ведомости затрат действует на общие поля выбранного квартала.
+    await page.locator('[data-sheet-header="expenses"] [data-fill-quarter="3"]').click();
+    for (const input of await page.locator('[data-input][data-quarter="3"]').all()) {
+      assert.strictEqual(await input.inputValue(), '0'); await input.fill('');
+    }
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-quarter-status="3"]')].every((el) => el.textContent === 'нет данных'));
     // Пять плашек независимы; сворачивание не исключает черновик из сохранения.
     const panels = [
       ['financial', '#sheet-financial-rows'], ['sales', '#sheet-sales-rows'], ['expenses', '#sheet-expense-rows'],
@@ -143,10 +188,18 @@ async function assertNoHorizontalScroll(page, width) {
     assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '120');
     assert.strictEqual(await categoryRow.locator('[data-expense][data-quarter="2"]').inputValue(), '6');
     await page.locator('#year-form button[type="submit"]').first().click();
-    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('#q-status-1').textContent === 'сохранён');
-    assert.strictEqual(await page.locator('#q-status-2').innerText(), 'сохранён');
+    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('[data-quarter-status="1"]').textContent === 'сохранён');
+    assert.strictEqual(await page.locator('[data-quarter-status="2"]').first().innerText(), 'сохранён');
+    assert(await page.locator('#save-status').isHidden(), 'Статус сохранения не занимает место после успешной записи');
+    assert.deepStrictEqual(await page.locator('[data-quarter-status="1"]').allTextContents(), ['сохранён', 'сохранён', 'сохранён']);
+    // Синтетическая история старой версии: проверяем доступ к ней без постоянного блока под таблицей.
+    execFileSync(python, ['-c', `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as db:
+ c=db.execute("UPDATE periods SET legacy_manual_deduction='7.25' WHERE year=2030 AND quarter=1")
+ assert c.rowcount == 1
+`, path.join(temp, 'analiz.sqlite3')]);
     await page.reload({ waitUntil: 'networkidle' });
-    await page.waitForFunction(() => document.querySelector('#q-status-1').textContent === 'сохранён');
+    await page.waitForFunction(() => document.querySelector('[data-quarter-status="1"]').textContent === 'сохранён');
     for (const [key, body] of panels) {
       const button = page.locator(`[data-panel-toggle="${key}"]`);
       assert.strictEqual(await button.getAttribute('aria-expanded'), 'false', 'Состояние плашки сохраняется при перезагрузке');
@@ -157,6 +210,14 @@ async function assertNoHorizontalScroll(page, width) {
     }
     assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '120');
     assert.strictEqual(await categoryRow.locator('[data-expense][data-quarter="2"]').inputValue(), '6');
+    const legacyValue = page.locator('[data-metric="non_vat_deduction"][data-quarter="1"]');
+    assert.strictEqual((await legacyValue.innerText()).trim(), '0,00', 'Исторический вычет не меняет расчёт');
+    assert.strictEqual(await legacyValue.getAttribute('role'), 'button');
+    assert((await legacyValue.getAttribute('aria-label')).includes('7,25'));
+    await legacyValue.press('Enter');
+    assert((await page.locator('#toast').innerText()).includes('7,25'));
+    await legacyValue.click();
+    assert((await page.locator('#toast').innerText()).includes('не используется'));
     await page.waitForFunction(() => Chart.getChart(document.querySelector('#expense-chart'))?.width > 0);
     assert.strictEqual(await page.locator('canvas').count(), 1, 'На странице должен остаться только график статей затрат');
     assert.strictEqual(await page.locator('#quarter-chart, #break-even-chart, #history-chart, #tax-chart').count(), 0);
@@ -166,28 +227,50 @@ async function assertNoHorizontalScroll(page, width) {
     assert.strictEqual((await choice.innerText()).trim(), 'Реклама — тест', 'Слева только название, без ставки, суммы и процента');
     assert.strictEqual((await page.locator('.expense-choice').filter({ hasText: 'Налог НДС' }).innerText()).trim(), 'Налог НДС');
     assert.strictEqual((await page.locator('.expense-choice').filter({ hasText: 'Налог на прибыль' }).innerText()).trim(), 'Налог на прибыль');
-    const chartNote = await page.locator('#expense-chart-note').innerText();
-    assert(chartNote.includes('себестоимость реализации не входит') && chartNote.includes('без конвертации'));
+    assert(await page.locator('#expense-chart-warning').isHidden());
+    assert((await page.locator('#expense-chart').getAttribute('title')).includes('без конвертации'));
+    assert((await page.locator('#expense-chart').getAttribute('aria-label')).includes('без конвертации'));
     const configuration = await page.evaluate(() => {
       const c = Chart.getChart(document.querySelector('#expense-chart'));
       const line = c.data.datasets.find((d) => d.label === 'Реклама — тест');
       return { type: c.config.type, duration: c.options.animation.duration, tick: c.options.scales.y.ticks.font.size,
         unit: c.options.scales.y.title.text, labels: c.data.labels, names: c.data.datasets.map((d) => d.label), values: line.data,
+        colors: c.data.datasets.map((d) => d.backgroundColor),
+        swatches: c.data.datasets.map((d) => document.querySelector(`[data-expense-choice="${d.expenseKey}"]`).parentElement.querySelector('.expense-series-dot').style.getPropertyValue('--series-color')),
         tooltip: c.options.plugins.tooltip.callbacks.label({ dataset: line, dataIndex: 0, raw: line.data[0] }) };
     });
-    assert.strictEqual(configuration.type, 'line');
+    assert.strictEqual(configuration.type, 'bar');
     assert.strictEqual(configuration.duration, 1000);
     assert.strictEqual(configuration.tick, 15);
     assert.strictEqual(configuration.unit, 'Сумма, руб.');
     assert.deepStrictEqual(configuration.labels, ['1 кв.', '2 кв.', '3 кв.', '4 кв.']);
     assert.deepStrictEqual(new Set(configuration.names), new Set(['Реклама — тест', 'Налог НДС', 'Налог на прибыль']));
+    assert.strictEqual(new Set(configuration.colors).size, configuration.names.length, 'Выбранные ряды различаются цветом');
+    assert.deepStrictEqual(configuration.swatches, configuration.colors, 'Цвета списка и столбцов совпадают');
     assert.deepStrictEqual(configuration.values, [3, 6, null, null], 'График использует суммы, не проценты');
     assert(configuration.tooltip.includes('3,00 руб.') && !configuration.tooltip.includes('%') && !configuration.tooltip.includes('ед.'), 'По решению владельца график всегда подписан в рублях');
+    const initialBarWidth = await page.evaluate(() => {
+      const c = Chart.getChart(document.querySelector('#expense-chart')); c.update('none');
+      return c.getDatasetMeta(c.data.datasets.findIndex((d) => d.label === 'Реклама — тест')).data[0].width;
+    });
+    await page.locator('#expense-select-all').click();
+    const allSelected = await page.evaluate(() => {
+      const c = Chart.getChart(document.querySelector('#expense-chart')); c.update('none');
+      const zero = c.data.datasets.filter((d) => d.grouped === false);
+      return { width: c.getDatasetMeta(c.data.datasets.findIndex((d) => d.label === 'Реклама — тест')).data[0].width,
+        zeroCount: zero.length, zeroValues: zero[0].data };
+    });
+    assert(allSelected.zeroCount >= 20 && allSelected.zeroValues[0] === 0, 'Нулевые ряды остаются нулями');
+    assert(allSelected.width >= initialBarWidth * .95, 'Нулевые ряды не сжимают видимые столбцы');
+    await page.locator('#expense-select-none').click();
+    await choice.locator('input').check();
+    await page.locator('[data-expense-choice="vat"]').check();
+    await page.locator('[data-expense-choice="profit_tax"]').check();
     await page.locator('[data-expense-choice="vat"]').uncheck();
-    assert.strictEqual(await page.locator('#expense-chart-note').innerText(), chartNote);
+    assert(await page.locator('#expense-chart-warning').isHidden());
     const afterHide = await page.evaluate(() => { const c = Chart.getChart(document.querySelector('#expense-chart')); return { count: c.data.datasets.length, values: c.data.datasets.find((d) => d.label === 'Реклама — тест').data }; });
     assert.strictEqual(afterHide.count, 2);
-    assert.deepStrictEqual(afterHide.values, configuration.values, 'Выбор других линий не меняет суммы');
+    assert.deepStrictEqual(afterHide.values, configuration.values, 'Выбор других столбцов не меняет суммы');
     await page.locator('#expense-select-none').click();
     assert(await page.locator('#expense-chart').isHidden());
     await choice.locator('input').check();
@@ -257,7 +340,7 @@ async function assertNoHorizontalScroll(page, width) {
     const savedFirst = page.waitForResponse((response) => response.url().endsWith('/api/year') && response.request().method() === 'POST');
     await page.locator('#year-form button[type="submit"]').first().click();
     assert.strictEqual((await savedFirst).status(), 200);
-    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('#save-status').textContent.includes('сохранены'));
+    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('#save-status').classList.contains('hidden'));
     await second.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('122');
     const staleSave = second.waitForResponse((response) => response.url().endsWith('/api/year') && response.request().method() === 'POST');
     await second.locator('#year-form button[type="submit"]').first().click();
@@ -270,7 +353,7 @@ async function assertNoHorizontalScroll(page, width) {
     const restored = page.waitForResponse((response) => response.url().endsWith('/api/year') && response.request().method() === 'POST');
     await page.locator('#year-form button[type="submit"]').first().click();
     assert.strictEqual((await restored).status(), 200);
-    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('#save-status').textContent.includes('сохранены'));
+    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('#save-status').classList.contains('hidden'));
 
     const [xlsxDownload] = await Promise.all([page.waitForEvent('download'), page.locator('#export-xlsx').click()]);
     const xlsx = path.join(temp, 'report.xlsx'); await xlsxDownload.saveAs(xlsx);
@@ -299,14 +382,15 @@ async function assertNoHorizontalScroll(page, width) {
     assert(await page.locator('#import-apply').isDisabled());
     await page.locator('#import-confirm').check(); await page.locator('#import-apply').click();
     await page.locator('#import-dialog').waitFor({ state: 'hidden' });
-    await page.waitForFunction(() => document.querySelector('#q-status-1').textContent === 'сохранён');
+    await page.waitForFunction(() => document.querySelector('[data-quarter-status="1"]').textContent === 'сохранён');
     assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '120');
     assert.strictEqual(await categoryRow.locator('[data-kind]').inputValue(), 'fixed');
+    assert((await page.locator('[data-metric="non_vat_deduction"][data-quarter="1"]').getAttribute('aria-label')).includes('7,25'), 'История вычета сохраняется при экспорте и импорте Excel');
 
     // Импорт в уже заполненный квартал по умолчанию не заменяет значения.
     await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('240');
     await page.locator('#year-form button[type="submit"]').first().click();
-    await page.waitForFunction(() => document.querySelector('#q-status-1').textContent === 'сохранён' && document.querySelector('[data-input="retail_revenue"][data-quarter="1"]').value === '240');
+    await page.waitForFunction(() => document.querySelector('[data-quarter-status="1"]').textContent === 'сохранён' && document.querySelector('[data-input="retail_revenue"][data-quarter="1"]').value === '240');
     await importFile(xlsx);
     assert(await page.locator('#import-conflicts').isVisible());
     assert(await page.locator('input[name="import-mode"][value="skip"]').isChecked());
@@ -370,7 +454,7 @@ async function assertNoHorizontalScroll(page, width) {
     const saveWithArchive = page.waitForResponse((response) => response.url().endsWith('/api/year') && response.request().method() === 'POST');
     await page.locator('#year-form button[type="submit"]').first().click();
     assert.strictEqual((await saveWithArchive).status(), 200);
-    await page.waitForFunction(() => document.querySelector('#q-status-1').textContent === 'сохранён');
+    await page.waitForFunction(() => document.querySelector('[data-quarter-status="1"]').textContent === 'сохранён');
     await page.locator('#toggle-archive').click();
     const archived = page.locator('.archive-item').filter({ hasText: 'Реклама — тест' });
     assert((await archived.innerText()).includes('9,00'));
@@ -399,7 +483,7 @@ async function assertNoHorizontalScroll(page, width) {
     // Неопределённый НДС больше не скрывает остальные денежные суммы квартала.
     await page.locator('#year-input').fill('2032'); await page.locator('#year-input').press('Tab');
     await page.waitForFunction(() => document.querySelector('#context-year').textContent.includes('2032'));
-    await page.locator('[data-fill-quarter="2"]').click();
+    await page.locator('[data-fill-quarter="2"]').first().click();
     await page.locator('[data-input="retail_revenue"][data-quarter="2"]').fill('120');
     await page.locator('[data-input="non_vat_sales"][data-quarter="2"]').fill('12');
     await page.locator('[data-input="input_vat"][data-quarter="2"]').fill('10');
@@ -407,9 +491,12 @@ async function assertNoHorizontalScroll(page, width) {
     const expenseId = await unknownExpense.getAttribute('data-expense');
     await unknownExpense.fill('5');
     await page.waitForFunction(() => document.querySelector('[data-metric="non_vat_deduction"][data-quarter="2"]').textContent === '#ДЕЛ/0!');
-    const note = await page.locator('#deduction-note').innerText();
-    assert(note.includes('1,00') && note.includes('#ДЕЛ/0!') && note.includes('сумма квартальных вычетов'));
-    await page.waitForFunction(() => document.querySelector('#expense-chart-note').textContent.includes('#ДЕЛ/0!'));
+    assert.strictEqual((await page.locator('[data-annual="non_vat_deduction"]').innerText()).trim(), '1,00', 'Годовой вычет остаётся рассчитанным');
+    await page.locator('[data-expense-choice="vat"]').check();
+    await page.waitForFunction(() => document.querySelector('#expense-chart-warning').textContent.includes('#ДЕЛ/0!'));
+    assert(await page.locator('#expense-chart-warning').isVisible());
+    await page.locator('[data-expense-choice="vat"]').uncheck();
+    assert(await page.locator('#expense-chart-warning').isHidden());
     await page.locator('[data-expense-choice="vat"]').check();
     const unknown = await page.evaluate((id) => {
       const c = Chart.getChart(document.querySelector('#expense-chart'));
@@ -422,7 +509,7 @@ async function assertNoHorizontalScroll(page, width) {
     // Отрицательный общий итог не блокирует график сумм и не меняет знак налогов.
     await page.locator('#year-input').fill('2033'); await page.locator('#year-input').press('Tab');
     await page.waitForFunction(() => document.querySelector('#context-year').textContent.includes('2033'));
-    await page.locator('[data-fill-quarter="1"]').click();
+    await page.locator('[data-fill-quarter="1"]').first().click();
     await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('120');
     await page.locator('[data-input="input_vat"][data-quarter="1"]').fill('40');
     await page.locator('[data-input="cost_of_sales"][data-quarter="1"]').fill('50');
@@ -436,9 +523,42 @@ async function assertNoHorizontalScroll(page, width) {
       return { category: c.data.datasets.find((d) => d.expenseKey === `category:${id}`).data[0], vat: c.data.datasets.find((d) => d.expenseKey === 'vat').data[0] };
     }, negativeId);
     assert.deepStrictEqual(negative, { category: 3, vat: -20 });
+    const geometry = await page.evaluate(() => {
+      const chart = Chart.getChart(document.querySelector('#expense-chart')); chart.update('none');
+      const vatIndex = chart.data.datasets.findIndex((dataset) => dataset.expenseKey === 'vat');
+      const bar = chart.getDatasetMeta(vatIndex).data[0];
+      return { element: bar.constructor.id, y: bar.y, base: bar.base, width: bar.width };
+    });
+    assert.strictEqual(geometry.element, 'bar');
+    assert(geometry.width > 0 && geometry.y > geometry.base, 'Отрицательная сумма рисуется столбцом ниже нуля');
     await assertNoHorizontalScroll(page, 390);
+
+    // Каждый раздел может быть единственным открытым: его кнопки квартала заполняют и удаляют общие данные.
+    await page.setViewportSize({ width: 1360, height: 900 });
+    await page.locator('#year-input').fill('2034'); await page.locator('#year-input').press('Tab');
+    await page.waitForFunction(() => document.querySelector('#context-year').textContent.includes('2034'));
+    for (const [index, group] of sheetGroups.entries()) {
+      const q = index + 1;
+      await page.locator(`[data-sheet-header="${group}"] [data-fill-quarter="${q}"]`).click();
+      await page.locator(`[data-input="retail_revenue"][data-quarter="${q}"]`).fill('120');
+    }
+    const savedDeleteTest = page.waitForResponse((response) => response.url().endsWith('/api/year') && response.request().method() === 'POST');
+    await page.locator('#year-form button[type="submit"]').first().click();
+    assert.strictEqual((await savedDeleteTest).status(), 200);
+    await page.waitForFunction(() => !document.querySelector('#application').inert && [...document.querySelectorAll('[data-quarter-status="1"]')].every((el) => el.textContent === 'сохранён'));
+    for (const [index, group] of sheetGroups.entries()) {
+      const q = index + 1;
+      for (const other of sheetGroups) {
+        const toggle = page.locator(`[data-panel-toggle="${other}"]`), shouldOpen = other === group;
+        if ((await toggle.getAttribute('aria-expanded') === 'true') !== shouldOpen) await toggle.click();
+      }
+      assert(await page.locator(`[data-sheet-header="${group}"] [data-delete-quarter="${q}"]`).isEnabled());
+      await page.locator(`[data-sheet-header="${group}"] [data-delete-quarter="${q}"]`).click();
+      await page.waitForFunction((quarter) => !document.querySelector('#application').inert && [...document.querySelectorAll(`[data-quarter-status="${quarter}"]`)].every((el) => el.textContent === 'нет данных'), q);
+      for (const button of await page.locator(`[data-delete-quarter="${q}"]`).all()) assert(await button.isDisabled());
+    }
     assert.deepStrictEqual(errors, [], `Ошибки браузера: ${errors.join('; ')}`);
-    console.log('UI smoke: ширина без горизонтального скролла, пять плашек, суммы в рублях, меню по наведению/клавиатуре/касанию, архив/удаление, XLSX и конкуренция — OK.');
+    console.log('UI smoke: шапка каждого раздела, столбчатые суммы в рублях, сохранение истории, ширина, меню, архив/удаление, XLSX и конкуренция — OK.');
   } finally {
     if (browser) await browser.close();
     if (child.exitCode === null) {
