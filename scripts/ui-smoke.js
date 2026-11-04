@@ -54,6 +54,32 @@ async function assertNoHorizontalScroll(page, width) {
   assert(result.document <= result.viewport && result.offenders.length === 0 && result.wide.length === 0, `Горизонтальная прокрутка при ${width}px: ${JSON.stringify(result)}`);
 }
 
+async function assertTableRowsFit(page) {
+  const issues = await page.evaluate(() => {
+    const rows = document.querySelectorAll('.sheet-table tbody:not(.sheet-group-header)>tr:not(.sheet-columns), .analysis-table tbody>tr');
+    const failures = [];
+    for (const row of rows) {
+      if (!row.getClientRects().length) continue;
+      const bounds = row.getBoundingClientRect(), next = row.nextElementSibling;
+      if (next?.getClientRects().length && next.getBoundingClientRect().top < bounds.bottom - 1.5) failures.push('строки пересекаются');
+      for (const element of row.querySelectorAll('td, .label-cell, .category-name-trigger, .cell-label, .cell-value, input, select')) {
+        const cell = element.closest('td')?.getBoundingClientRect();
+        for (const rect of element.getClientRects()) {
+          if (rect.height && (rect.top < bounds.top - 1.5 || rect.bottom > bounds.bottom + 1.5)) {
+            failures.push(`${element.tagName}.${element.className} выходит за строку`); break;
+          }
+          if (rect.width && cell && (rect.left < cell.left - 1.5 || rect.right > cell.right + 1.5)) {
+            failures.push(`${element.tagName}.${element.className} выходит за ячейку`); break;
+          }
+        }
+      }
+      if (failures.length >= 10) break;
+    }
+    return failures;
+  });
+  assert.deepStrictEqual(issues, [], `Содержимое таблиц выходит за компактные строки: ${issues.join('; ')}`);
+}
+
 (async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'analiz-ui-'));
   const port = await freePort();
@@ -120,6 +146,26 @@ async function assertNoHorizontalScroll(page, width) {
       assert.strictEqual(await header.locator('[data-open-quarter-menu]').count(), 4);
     }
     await assertCleanHeaders();
+    // Строки обеих таблиц компактнее прежних, размер текста не уменьшен.
+    await page.setViewportSize({ width: 1920, height: 900 });
+    const desktopRows = await page.evaluate(() => {
+      const height = (selector) => document.querySelector(selector).getBoundingClientRect().height;
+      const input = document.querySelector('[data-input="retail_revenue"][data-quarter="1"]');
+      return { calculated: height('#sheet-financial-rows tr:nth-child(2)'), entered: input.closest('tr').getBoundingClientRect().height,
+        category: height('#sheet-expense-rows .category-row'), analysis: height('#analysis-body tr'),
+        input: input.getBoundingClientRect().height, select: height('#sheet-expense-rows .sheet-select') };
+    });
+    assert(desktopRows.calculated <= 36 && desktopRows.entered <= 49 && desktopRows.category <= 49 && desktopRows.analysis <= 40, `Строки всё ещё слишком высокие: ${JSON.stringify(desktopRows)}`);
+    assert(desktopRows.input >= 34 && desktopRows.input <= 40 && desktopRows.select >= 34 && desktopRows.select <= 40, `Неудобный размер полей: ${JSON.stringify(desktopRows)}`);
+    await assertTableRowsFit(page);
+    // На сенсорном мониторе поля остаются крупнее, даже при большой ширине окна.
+    const coarsePointer = await context.newCDPSession(page);
+    await coarsePointer.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+    await page.waitForFunction(() => matchMedia('(pointer: coarse)').matches && document.querySelector('.sheet-input').getBoundingClientRect().height >= 44);
+    assert((await page.locator('#sheet-expense-rows .sheet-select').first().boundingBox()).height >= 44);
+    await assertTableRowsFit(page);
+    await coarsePointer.send('Emulation.setTouchEmulationEnabled', { enabled: false }); await coarsePointer.detach();
+    await page.setViewportSize({ width: 1360, height: 900 });
     // Меню открывается клавиатурой и не показывает несуществующее удаление активным.
     const firstQuarter = quarterTrigger('financial', 1);
     await firstQuarter.press('Enter');
@@ -157,6 +203,20 @@ async function assertNoHorizontalScroll(page, width) {
       await assertNoHorizontalScroll(page, 320);
     }
     assert.strictEqual((await page.locator('#expense-plot-area').boundingBox()).height, 660, 'График на узком экране вдвое выше');
+    const mobileRows = await page.evaluate(() => {
+      const height = (selector) => document.querySelector(selector).getBoundingClientRect().height;
+      return { calculated: height('#sheet-financial-rows tr:nth-child(2)'), category: height('#sheet-expense-rows .category-row'),
+        analysis: height('#analysis-body tr'), input: height('[data-input="retail_revenue"][data-quarter="1"]'),
+        select: height('#sheet-expense-rows .sheet-select') };
+    });
+    assert(mobileRows.calculated < 175 && mobileRows.category < 330 && mobileRows.analysis < 175, `Мобильные таблицы не стали компактнее: ${JSON.stringify(mobileRows)}`);
+    assert(mobileRows.input >= 44 && mobileRows.select >= 44, 'Поля должны оставаться удобными для касания');
+    for (const selector of ['#sheet-financial-rows tr:nth-child(2) td.calculated', '#analysis-body tr:nth-child(1) td:nth-child(2)']) {
+      const cell = page.locator(selector).first();
+      assert(/^1 кв\.\s/.test(await cell.textContent()), 'Метка квартала отделена от значения');
+      assert.strictEqual(await cell.locator('.cell-label').evaluate((el) => getComputedStyle(el).display), 'inline');
+    }
+    await assertTableRowsFit(page);
     for (const button of await page.locator('.heading-actions .button').all()) {
       assert(await button.evaluate((el) => el.scrollWidth <= el.clientWidth + 1), 'Текст кнопок помещается на узком экране');
     }
@@ -367,7 +427,10 @@ with sqlite3.connect(sys.argv[1]) as db:
         element.dataset.originalText = element.textContent; element.textContent = text;
       }
     });
-    for (const width of [1920, 1360, 1151, 1150, 1024, 900, 768, 600, 390, 320]) await assertNoHorizontalScroll(page, width);
+    for (const width of [1920, 1360, 1151, 1150, 1024, 900, 768, 600, 390, 320]) {
+      await assertNoHorizontalScroll(page, width);
+      await assertTableRowsFit(page);
+    }
     await longName.evaluate((element) => { element.textContent = element.dataset.originalText; });
     await page.evaluate(() => {
       for (const element of document.querySelectorAll('#context-org, #currency-label, #organization-select option:checked')) element.textContent = element.dataset.originalText;
@@ -660,7 +723,7 @@ with sqlite3.connect(sys.argv[1]) as db:
       await assertCleanHeaders();
     }
     assert.deepStrictEqual(errors, [], `Ошибки браузера: ${errors.join('; ')}`);
-    console.log('UI smoke: чистые шапки, меню кварталов, высокий график, сохранение истории, ширина, архив/удаление, XLSX и конкуренция — OK.');
+    console.log('UI smoke: компактные таблицы, доступные поля, меню, график, история, ширина, архив/удаление, XLSX и конкуренция — OK.');
   } finally {
     if (browser) await browser.close();
     if (child.exitCode === null) {

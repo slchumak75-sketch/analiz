@@ -150,7 +150,7 @@ function rawExpenseValue(summary, draft, quarter, category) {
   if (draft && Object.hasOwn(draft.quarters[String(quarter)].expenses, key)) return draft.quarters[String(quarter)].expenses[key];
   const value = category.quarters[quarter - 1]; return value === null || n(value) === 0 ? '' : value;
 }
-function cellCaption(label) { return `<span class="cell-label">${esc(label)}</span>`; }
+function cellCaption(label) { return `<span class="cell-label">${esc(label)} </span>`; }
 function categoryTrigger(item, archived) {
   return `<button class="category-name-trigger" type="button" data-open-category-menu="${item.id}" data-archived="${archived}" data-category-name="${esc(item.name)}" aria-haspopup="menu" aria-expanded="false" aria-controls="category-actions-menu" aria-label="${esc(item.name)} — действия со статьёй">${esc(item.name)}</button>`;
 }
