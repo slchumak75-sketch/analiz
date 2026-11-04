@@ -1,0 +1,68 @@
+name: Build Windows application
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: '1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Test and build Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            requirements-build.txt
+      - name: Set up Node.js for browser tests
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install build and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt -r requirements-build.txt
+          npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify workbook inventory and calculations
+        run: |
+          python scripts/audit_workbook.py --check
+          python -m pytest -q
+          node --check web/app.js
+      - name: Exercise UI in installed Chrome or Edge
+        run: npm run test:ui
+      - name: Build standalone EXE
+        run: >-
+          python -m PyInstaller --noconfirm --clean --onefile --windowed
+          --name AnalizOrganizaciy --add-data "web;web" app.py
+      - name: Smoke-test bundled application
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path 'dist/AnalizOrganizaciy.exe'
+          $process = Start-Process -FilePath $exe -ArgumentList '--self-test' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Bundled executable self-test failed: $($process.ExitCode)" }
+      - name: Upload Windows application
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: AnalizOrganizaciy-Windows-x64
+          path: dist/AnalizOrganizaciy.exe
+          if-no-files-found: error
+          retention-days: 90
