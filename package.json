@@ -1,6 +1,6 @@
 {
   "name": "analiz-organizaciy-tests",
-  "version": "3.3.0",
+  "version": "3.3.1",
   "private": true,
   "description": "Только browser smoke tests; приложение работает без Node.js",
   "scripts": {

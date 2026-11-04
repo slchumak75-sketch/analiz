@@ -51,8 +51,10 @@ def self_test() -> None:
         assert all(f'data-panel-toggle="{key}"' in index for key in ("financial", "sales", "expenses", "analysis", "chart"))
         assert index.count("<canvas ") == 1 and 'id="expense-chart"' in index
         assert 'id="deduction-note"' not in index and 'id="expense-chart-note"' not in index
+        assert 'id="quarter-actions-menu"' in index
         script = (Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "web" / "app.js").read_text(encoding="utf-8")
         assert "new Chart(canvas, { type: 'bar'" in script and 'data-sheet-header=' in script
+        assert 'data-open-quarter-menu=' in script and 'data-quarter-status=' not in script
         # Проверяем, что упакованный HTTP-сервер отдаёт HTML и health endpoint.
         from urllib.request import urlopen
         with AnalizServer(("127.0.0.1", 0), store) as server:

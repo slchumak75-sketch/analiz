@@ -94,7 +94,7 @@ function applyPanel(toggle) {
 function togglePanel(toggle) {
   const key = toggle.dataset.panelToggle;
   if (!PANEL_KEYS.has(key)) return;
-  closeCategoryMenu();
+  closeCategoryMenu(); closeQuarterMenu();
   if (state.collapsedPanels.has(key)) state.collapsedPanels.delete(key); else state.collapsedPanels.add(key);
   applyPanel(toggle);
   try { localStorage.setItem('analiz-collapsed-panels', JSON.stringify([...state.collapsedPanels])); } catch (_) { /* отключено */ }
@@ -156,11 +156,11 @@ function categoryTrigger(item, archived) {
 }
 function sheetColumns(group) {
   const prefix = `sheet-${group}`;
-  const quarters = [1, 2, 3, 4].map((q) => `<th scope="col" id="${prefix}-q${q}"><div>${q} квартал</div><span data-quarter-status="${q}" class="quarter-state"></span><span class="quarter-actions"><button type="button" data-fill-quarter="${q}" title="Заполнить пустые основные поля нулями" aria-label="Заполнить пустые основные поля ${q} квартала нулями">+ нули</button><button type="button" data-delete-quarter="${q}" title="Удалить сохранённый квартал" aria-label="Удалить сохранённый ${q} квартал">×</button></span></th>`).join('');
+  const quarters = [1, 2, 3, 4].map((q) => `<th scope="col" id="${prefix}-q${q}"><button type="button" class="quarter-heading" data-open-quarter-menu="${q}" aria-haspopup="menu" aria-controls="quarter-actions-menu" aria-expanded="false" aria-label="${q} квартал — действия" title="Действия с ${q} кварталом">${q} квартал</button></th>`).join('');
   return `<tr class="sheet-columns" data-sheet-header="${group}"><th scope="col" id="${prefix}-label">Показатель / статья затрат</th><th scope="col" id="${prefix}-vat">НДС, %</th><th scope="col" id="${prefix}-type">Тип затрат</th>${quarters}<th scope="col" id="${prefix}-total">Итого за год</th></tr>`;
 }
 function renderSheet(summary, draft = null) {
-  closeCategoryMenu();
+  closeCategoryMenu(); closeQuarterMenu();
   const groups = { financial: sheetColumns('financial'), sales: sheetColumns('sales'), expenses: sheetColumns('expenses') };
   for (const [row, label, key, manual] of reportRows) {
     const group = Number(row) < 8 ? 'financial' : 'sales', prefix = `sheet-${group}`;
@@ -248,14 +248,6 @@ function updateSheetValues(s) {
   });
   const byId = Object.fromEntries(s.expenses.map((expense) => [String(expense.id), expense]));
   $$('[data-category-total]').forEach((cell) => { cell.textContent = s.quarter_count ? money(byId[cell.dataset.categoryTotal]?.total) : '—'; });
-  for (let q = 1; q <= 4; q++) {
-    const item = s.quarters[q - 1], wasSaved = state.saved?.quarters[q - 1]?.exists;
-    const status = item.state === 'incomplete' ? 'не заполнен' : item.state === 'empty' ? 'нет данных' : state.dirty ? 'черновик' : 'сохранён';
-    $$(`[data-quarter-status="${q}"]`).forEach((label) => {
-      label.textContent = status; label.classList.toggle('saved', status === 'сохранён'); label.classList.toggle('incomplete', status === 'не заполнен');
-    });
-    $$(`[data-delete-quarter="${q}"]`).forEach((button) => { button.disabled = !wasSaved; });
-  }
 }
 function changeBadge(key, current, comparable) {
   if (!comparable) return '<span>Нет сравнимых кварталов прошлого года</span>';
@@ -490,6 +482,38 @@ async function changeCategoryArchive(id, archived) {
     await refresh(); toast(archived ? 'Статья скрыта в архиве; история сохранена.' : 'Статья восстановлена.');
   } finally { state.categoryChanging = false; $('#application').inert = false; }
 }
+let activeQuarterMenuTrigger = null;
+function closeQuarterMenu(restoreFocus = false) {
+  const trigger = activeQuarterMenuTrigger;
+  if (trigger) trigger.setAttribute('aria-expanded', 'false');
+  activeQuarterMenuTrigger = null;
+  $('#quarter-actions-menu').classList.add('hidden');
+  if (restoreFocus && trigger?.isConnected) trigger.focus({ preventScroll: true });
+}
+function positionQuarterMenu() {
+  const trigger = activeQuarterMenuTrigger, menu = $('#quarter-actions-menu');
+  if (!trigger?.isConnected) { closeQuarterMenu(); return; }
+  const target = trigger.getBoundingClientRect();
+  if (target.bottom < 0 || target.top > innerHeight || target.right < 0 || target.left > innerWidth || !target.width) { closeQuarterMenu(); return; }
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(8, Math.min(target.left, innerWidth - rect.width - 8));
+  const below = target.bottom + 4;
+  const top = below + rect.height <= innerHeight - 8 ? below : Math.max(8, target.top - rect.height - 4);
+  menu.style.left = `${left}px`; menu.style.top = `${top}px`;
+}
+function openQuarterMenu(trigger) {
+  if (trigger === activeQuarterMenuTrigger) { closeQuarterMenu(true); return; }
+  closeCategoryMenu(); closeQuarterMenu();
+  const q = Number(trigger.dataset.openQuarterMenu);
+  if (!Number.isInteger(q) || q < 1 || q > 4) return;
+  const menu = $('#quarter-actions-menu'), wasSaved = state.saved?.quarters[q - 1]?.exists;
+  menu.setAttribute('aria-label', `Действия: ${q} квартал`);
+  menu.innerHTML = `<button type="button" role="menuitem" data-fill-quarter="${q}">Заполнить пустые поля нулями</button><button type="button" role="menuitem" class="danger-link" data-delete-quarter="${q}" ${wasSaved ? '' : 'disabled'}>Удалить квартал</button>`;
+  menu.style.visibility = 'hidden'; menu.classList.remove('hidden');
+  activeQuarterMenuTrigger = trigger; trigger.setAttribute('aria-expanded', 'true');
+  positionQuarterMenu(); menu.style.visibility = '';
+  menu.querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
+}
 let activeCategoryMenuTrigger = null, categoryMenuCloseTimer = null;
 function closeCategoryMenu(restoreFocus = false) {
   clearTimeout(categoryMenuCloseTimer);
@@ -511,6 +535,9 @@ function positionCategoryMenu() {
   menu.style.left = `${left}px`; menu.style.top = `${top}px`;
 }
 function openCategoryMenu(trigger, focusMenu = false) {
+  // Наведение на статью не должно забирать фокус у открытого с клавиатуры меню квартала.
+  if (!focusMenu && activeQuarterMenuTrigger && $('#quarter-actions-menu').contains(document.activeElement)) return;
+  closeQuarterMenu();
   clearTimeout(categoryMenuCloseTimer);
   const menu = $('#category-actions-menu');
   if (trigger !== activeCategoryMenuTrigger) {
@@ -548,8 +575,14 @@ document.addEventListener('pointerout', (event) => {
   if (next instanceof Node && (activeCategoryMenuTrigger.contains(next) || menu.contains(next))) return;
   scheduleCategoryMenuClose();
 });
-window.addEventListener('scroll', () => { if (activeCategoryMenuTrigger) positionCategoryMenu(); }, true);
-window.addEventListener('resize', () => { if (activeCategoryMenuTrigger) positionCategoryMenu(); });
+window.addEventListener('scroll', () => {
+  if (activeCategoryMenuTrigger) positionCategoryMenu();
+  if (activeQuarterMenuTrigger) positionQuarterMenu();
+}, true);
+window.addEventListener('resize', () => {
+  if (activeCategoryMenuTrigger) positionCategoryMenu();
+  if (activeQuarterMenuTrigger) positionQuarterMenu();
+});
 document.addEventListener('keydown', (event) => {
   if (!activeCategoryMenuTrigger) return;
   const menu = $('#category-actions-menu'), focusInMenu = menu.contains(document.activeElement);
@@ -558,6 +591,18 @@ document.addEventListener('keydown', (event) => {
   if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) && (focusInMenu || activeCategoryMenuTrigger === document.activeElement)) {
     event.preventDefault();
     const buttons = [...menu.querySelectorAll('button')], current = buttons.indexOf(document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : current < 0 ? (event.key === 'ArrowUp' ? buttons.length - 1 : 0) : (current + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+    buttons[next]?.focus({ preventScroll: true });
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (!activeQuarterMenuTrigger) return;
+  const menu = $('#quarter-actions-menu'), focusInMenu = menu.contains(document.activeElement);
+  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeQuarterMenu(focusInMenu || activeQuarterMenuTrigger === document.activeElement); return; }
+  if (event.key === 'Tab') { closeQuarterMenu(focusInMenu); return; }
+  if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) && (focusInMenu || activeQuarterMenuTrigger === document.activeElement)) {
+    event.preventDefault();
+    const buttons = [...menu.querySelectorAll('button:not(:disabled)')], current = buttons.indexOf(document.activeElement);
     const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : current < 0 ? (event.key === 'ArrowUp' ? buttons.length - 1 : 0) : (current + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
     buttons[next]?.focus({ preventScroll: true });
   }
@@ -571,22 +616,25 @@ document.addEventListener('keydown', (event) => {
 });
 document.addEventListener('click', (event) => {
   const legacy = event.target.closest('[data-legacy-deduction]');
-  if (legacy) { showLegacyDeduction(legacy); return; }
+  if (legacy) { closeCategoryMenu(); closeQuarterMenu(); showLegacyDeduction(legacy); return; }
   const panel = event.target.closest('[data-panel-toggle]');
   if (panel) { togglePanel(panel); return; }
   const menuTrigger = event.target.closest('[data-open-category-menu]');
   if (menuTrigger) { openCategoryMenu(menuTrigger, true); return; }
+  const quarterTrigger = event.target.closest('[data-open-quarter-menu]');
+  if (quarterTrigger) { openQuarterMenu(quarterTrigger); return; }
   if (!event.target.closest('#category-actions-menu')) closeCategoryMenu();
+  if (!event.target.closest('#quarter-actions-menu')) closeQuarterMenu();
   const close = event.target.closest('[data-close-dialog]'); if (close) { $(`#${close.dataset.closeDialog}`).close(); return; }
   const fill = event.target.closest('[data-fill-quarter]');
   if (fill) {
-    const q = fill.dataset.fillQuarter;
+    const q = fill.dataset.fillQuarter; closeQuarterMenu(true);
     $$(`[data-input][data-quarter="${q}"]`).forEach((input) => { if (!input.value.trim()) input.value = '0'; });
     setDirty(true); schedulePreview(); return;
   }
   const remove = event.target.closest('[data-delete-quarter]');
   if (remove) {
-    const q = Number(remove.dataset.deleteQuarter); if (!requireSaved()) return;
+    const q = Number(remove.dataset.deleteQuarter); closeQuarterMenu(true); if (!requireSaved()) return;
     if (!window.confirm(`Удалить все данные за ${q} квартал ${state.year} года?`)) return;
     api('/api/period', { method: 'DELETE', body: { organization_id: state.organizationId, year: state.year, quarter: q } }).then(() => refresh()).then(() => toast('Квартал удалён.')).catch(fail); return;
   }

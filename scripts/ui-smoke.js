@@ -79,7 +79,8 @@ async function assertNoHorizontalScroll(page, width) {
       page.on('console', (message) => console.log('BROWSER:', message.type(), message.text()));
       page.on('response', (response) => { if (response.url().includes('/api/excel/')) console.log('EXCEL:', response.status(), response.url()); });
     }
-    page.on('dialog', (dialog) => dialog.accept());
+    let acceptDialogs = true;
+    page.on('dialog', (dialog) => acceptDialogs ? dialog.accept() : dialog.dismiss());
     await page.goto(url, { waitUntil: 'networkidle' });
     assert(await page.locator('#empty-onboarding').isVisible(), 'Новая база должна быть пустой');
     await page.locator('#onboarding-create').click();
@@ -89,16 +90,49 @@ async function assertNoHorizontalScroll(page, width) {
     await page.waitForSelector('#main-content:not(.hidden)');
     assert.strictEqual(await page.locator('#context-org').innerText(), 'Тестовая организация');
     assert.strictEqual(await page.locator('.navigation').count(), 0, 'Разделы должны быть на одной странице');
-    assert.strictEqual(await page.locator('[data-fill-quarter]').count(), 12, 'В каждом разделе есть действия четырёх кварталов');
+    assert.strictEqual(await page.locator('[data-open-quarter-menu]').count(), 12, 'В каждом разделе есть заголовки четырёх кварталов');
+    assert.strictEqual(await page.locator('#sheet-table [data-quarter-status], #sheet-table [data-fill-quarter], #sheet-table [data-delete-quarter], #sheet-table .quarter-actions').count(), 0, 'Статусы и кнопки убраны из всех шапок');
     assert.strictEqual(await page.locator('[data-input="non_vat_deduction"]').count(), 0, 'Строка вычета теперь расчётная');
     assert.strictEqual(await page.locator('[data-input="retail_revenue"]').count(), 4);
     const sheetGroups = ['financial', 'sales', 'expenses'];
+    const quarterTrigger = (group, q) => page.locator(`[data-sheet-header="${group}"] [data-open-quarter-menu="${q}"]`);
+    const openQuarterMenu = async (group, q) => {
+      await quarterTrigger(group, q).click();
+      await page.locator('#quarter-actions-menu').waitFor({ state: 'visible' });
+    };
+    const fillQuarter = async (q, group = 'financial') => {
+      await openQuarterMenu(group, q);
+      await page.locator(`#quarter-actions-menu [data-fill-quarter="${q}"]`).click();
+      assert(await page.locator('#quarter-actions-menu').isHidden());
+    };
+    const assertCleanHeaders = async () => {
+      assert.strictEqual(await page.locator('#sheet-table [data-quarter-status], #sheet-table [data-fill-quarter], #sheet-table [data-delete-quarter], #sheet-table .quarter-actions').count(), 0);
+      for (const group of sheetGroups) {
+        const text = await page.locator(`[data-sheet-header="${group}"]`).textContent();
+        assert(!/сохранён|нет данных|не заполнен|черновик|\+ нули|×/.test(text), `Лишний текст в шапке ${group}: ${text}`);
+      }
+    };
     for (const group of sheetGroups) {
       const header = page.locator(`[data-sheet-header="${group}"]`);
       assert(await header.isVisible());
       for (const name of ['Показатель / статья затрат', 'НДС, %', 'Тип затрат', '1 квартал', '2 квартал', '3 квартал', '4 квартал', 'Итого за год']) assert((await header.innerText()).includes(name), `${group}: нет ${name}`);
       assert.strictEqual(await header.locator('th[scope="col"]').count(), 8);
+      assert.strictEqual(await header.locator('[data-open-quarter-menu]').count(), 4);
     }
+    await assertCleanHeaders();
+    // Меню открывается клавиатурой и не показывает несуществующее удаление активным.
+    const firstQuarter = quarterTrigger('financial', 1);
+    await firstQuarter.press('Enter');
+    assert.strictEqual(await firstQuarter.getAttribute('aria-expanded'), 'true');
+    assert(await page.locator('#quarter-actions-menu [data-delete-quarter="1"]').isDisabled());
+    await page.keyboard.press('ArrowDown');
+    assert(await page.locator('#quarter-actions-menu [data-fill-quarter="1"]').evaluate((el) => el === document.activeElement));
+    await page.keyboard.press('Escape');
+    assert(await page.locator('#quarter-actions-menu').isHidden());
+    assert(await firstQuarter.evaluate((el) => el === document.activeElement));
+    await firstQuarter.click(); await page.keyboard.press('Tab');
+    assert(await page.locator('#quarter-actions-menu').isHidden());
+    assert(await quarterTrigger('financial', 2).evaluate((el) => el === document.activeElement));
     // Шапка непосредственно под каждым открытым разделом; все восемь комбинаций независимы.
     for (let mask = 0; mask < 8; mask++) {
       for (const [index, group] of sheetGroups.entries()) {
@@ -116,13 +150,31 @@ async function assertNoHorizontalScroll(page, width) {
         const header = page.locator(`[data-sheet-header="${group}"]`);
         assert.strictEqual(await header.isVisible(), shouldOpen, `Узкая шапка ${group}, комбинация ${mask}`);
         if (shouldOpen) {
-          assert(await header.locator('[data-fill-quarter="4"]').isVisible());
+          assert(await header.locator('[data-open-quarter-menu="4"]').isVisible());
           assert((await header.innerText()).includes('1 квартал'));
         }
       }
       await assertNoHorizontalScroll(page, 320);
     }
+    assert.strictEqual((await page.locator('#expense-plot-area').boundingBox()).height, 660, 'График на узком экране вдвое выше');
+    for (const button of await page.locator('.heading-actions .button').all()) {
+      assert(await button.evaluate((el) => el.scrollWidth <= el.clientWidth + 1), 'Текст кнопок помещается на узком экране');
+    }
+    // Настоящее касание заголовка открывает меню и оно помещается в окне.
+    const touchQuarter = quarterTrigger('sales', 4);
+    await touchQuarter.scrollIntoViewIfNeeded();
+    const touchQuarterBox = await touchQuarter.boundingBox();
+    const quarterCdp = await context.newCDPSession(page);
+    await quarterCdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+    await quarterCdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: touchQuarterBox.x + touchQuarterBox.width / 2, y: touchQuarterBox.y + touchQuarterBox.height / 2 }] });
+    await quarterCdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await page.locator('#quarter-actions-menu').waitFor({ state: 'visible' });
+    const quarterMenuBox = await page.locator('#quarter-actions-menu').boundingBox();
+    assert(quarterMenuBox.x >= 0 && quarterMenuBox.x + quarterMenuBox.width <= 320 && quarterMenuBox.y >= 0 && quarterMenuBox.y + quarterMenuBox.height <= 900);
+    await page.keyboard.press('Escape');
+    await quarterCdp.send('Emulation.setTouchEmulationEnabled', { enabled: false }); await quarterCdp.detach();
     await page.setViewportSize({ width: 1360, height: 900 });
+    assert.strictEqual((await page.locator('#expense-plot-area').boundingBox()).height, 800, 'График на широком экране вдвое выше');
     assert(await page.locator('#save-status').isHidden() && await page.locator('#preview-status').isHidden());
     assert.strictEqual(await page.locator('#deduction-note, #expense-chart-note, .sheet-note').count(), 0);
     const unwanted = ['ПРОДАЖИ · ЗАТРАТЫ · РЕЗУЛЬТАТ', 'Таблица и вся аналитика — на одной странице', 'Локальное хранение', 'КВАРТАЛЬНЫЙ ОТЧЁТ', 'Поля ввода выделены зелёным', 'Строки и формулы соответствуют исходной таблице', 'Все изменения сохранены', 'Данные на вашем компьютере', 'Вычет по формуле H15', 'Прежние ручные вычеты (не используются в расчётах)', 'ИНТЕРПРЕТАЦИЯ РЕЗУЛЬТАТОВ', 'Показатели по введённым кварталам', 'ВЫРУЧКА БЕЗ НДС', 'Себестоимость продаж — переменная', 'Точка безубыточности = постоянные затраты', 'НАГЛЯДНАЯ КАРТИНА', 'Суммы статей и налогов по кварталам выбранного года', 'СТРУКТУРА', 'Суммы выбранных статей и налогов по кварталам, руб.', 'Показаны суммы статей, НДС к уплате'];
@@ -137,7 +189,7 @@ async function assertNoHorizontalScroll(page, width) {
     await page.locator('#year-input').fill('2030');
     await page.locator('#year-input').press('Tab');
     await page.waitForFunction(() => document.querySelector('#context-year').textContent.includes('2030'));
-    await page.locator('[data-fill-quarter="1"]').first().click();
+    await fillQuarter(1);
     await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('120');
     await page.locator('[data-input="input_vat"][data-quarter="1"]').fill('10');
     await page.locator('[data-input="cost_of_sales"][data-quarter="1"]').fill('50');
@@ -151,7 +203,7 @@ async function assertNoHorizontalScroll(page, width) {
     await categoryRow.waitFor({ state: 'visible' });
     assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '120');
     await categoryRow.locator('[data-expense][data-quarter="1"]').fill('3');
-    await page.locator('[data-sheet-header="sales"] [data-fill-quarter="2"]').click();
+    await fillQuarter(2, 'sales');
     await page.locator('[data-input="retail_revenue"][data-quarter="2"]').fill('120');
     await page.locator('[data-input="input_vat"][data-quarter="2"]').fill('10');
     await page.locator('[data-input="cost_of_sales"][data-quarter="2"]').fill('50');
@@ -165,12 +217,21 @@ async function assertNoHorizontalScroll(page, width) {
     await page.locator('#preview-status.error').waitFor({ state: 'visible' });
     await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('120');
     await page.waitForFunction(() => document.querySelector('#preview-status').classList.contains('hidden'));
-    // Кнопка из ведомости затрат действует на общие поля выбранного квартала.
-    await page.locator('[data-sheet-header="expenses"] [data-fill-quarter="3"]').click();
+    // Наведение на статью не должно отнимать фокус у меню квартала, открытого клавиатурой.
+    const expenseQuarter = quarterTrigger('expenses', 1);
+    await expenseQuarter.scrollIntoViewIfNeeded();
+    await expenseQuarter.press('Enter');
+    await page.locator('#sheet-expense-rows [data-open-category-menu]').first().hover();
+    assert(await page.locator('#quarter-actions-menu').isVisible());
+    assert(await page.locator('#category-actions-menu').isHidden());
+    assert(await page.locator('#quarter-actions-menu [data-fill-quarter="1"]').evaluate((el) => el === document.activeElement));
+    await page.keyboard.press('Escape');
+    // Меню из ведомости затрат действует на общие поля выбранного квартала.
+    await fillQuarter(3, 'expenses');
     for (const input of await page.locator('[data-input][data-quarter="3"]').all()) {
       assert.strictEqual(await input.inputValue(), '0'); await input.fill('');
     }
-    await page.waitForFunction(() => [...document.querySelectorAll('[data-quarter-status="3"]')].every((el) => el.textContent === 'нет данных'));
+    await assertCleanHeaders();
     // Пять плашек независимы; сворачивание не исключает черновик из сохранения.
     const panels = [
       ['financial', '#sheet-financial-rows'], ['sales', '#sheet-sales-rows'], ['expenses', '#sheet-expense-rows'],
@@ -187,11 +248,12 @@ async function assertNoHorizontalScroll(page, width) {
     assert(await page.locator('#category-management').isHidden());
     assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '120');
     assert.strictEqual(await categoryRow.locator('[data-expense][data-quarter="2"]').inputValue(), '6');
+    const savedClosedPanels = page.waitForResponse((response) => response.url().endsWith('/api/year') && response.request().method() === 'POST');
     await page.locator('#year-form button[type="submit"]').first().click();
-    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('[data-quarter-status="1"]').textContent === 'сохранён');
-    assert.strictEqual(await page.locator('[data-quarter-status="2"]').first().innerText(), 'сохранён');
+    assert.strictEqual((await savedClosedPanels).status(), 200);
+    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('#save-status').classList.contains('hidden'));
     assert(await page.locator('#save-status').isHidden(), 'Статус сохранения не занимает место после успешной записи');
-    assert.deepStrictEqual(await page.locator('[data-quarter-status="1"]').allTextContents(), ['сохранён', 'сохранён', 'сохранён']);
+    await assertCleanHeaders();
     // Синтетическая история старой версии: проверяем доступ к ней без постоянного блока под таблицей.
     execFileSync(python, ['-c', `import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as db:
@@ -199,7 +261,8 @@ with sqlite3.connect(sys.argv[1]) as db:
  assert c.rowcount == 1
 `, path.join(temp, 'analiz.sqlite3')]);
     await page.reload({ waitUntil: 'networkidle' });
-    await page.waitForFunction(() => document.querySelector('[data-quarter-status="1"]').textContent === 'сохранён');
+    await page.waitForFunction(() => document.querySelector('[data-input="retail_revenue"][data-quarter="1"]')?.value === '120');
+    await assertCleanHeaders();
     for (const [key, body] of panels) {
       const button = page.locator(`[data-panel-toggle="${key}"]`);
       assert.strictEqual(await button.getAttribute('aria-expanded'), 'false', 'Состояние плашки сохраняется при перезагрузке');
@@ -249,6 +312,19 @@ with sqlite3.connect(sys.argv[1]) as db:
     assert.deepStrictEqual(configuration.swatches, configuration.colors, 'Цвета списка и столбцов совпадают');
     assert.deepStrictEqual(configuration.values, [3, 6, null, null], 'График использует суммы, не проценты');
     assert(configuration.tooltip.includes('3,00 руб.') && !configuration.tooltip.includes('%') && !configuration.tooltip.includes('ед.'), 'По решению владельца график всегда подписан в рублях');
+    const heights = await page.evaluate(() => {
+      const area = document.querySelector('#expense-plot-area'), chart = Chart.getChart(document.querySelector('#expense-chart'));
+      const index = chart.data.datasets.findIndex((d) => d.label === 'Реклама — тест');
+      const measure = () => { chart.stop(); chart.resize(); chart.update('none'); const bar = chart.getDatasetMeta(index).data[0]; return { canvas: chart.height, bar: Math.abs(bar.base - bar.y) }; };
+      const tall = measure();
+      area.style.height = '400px'; const original = measure();
+      area.style.removeProperty('height'); measure();
+      return { tall, original, values: chart.data.datasets[index].data };
+    });
+    assert.strictEqual(heights.tall.canvas, 800);
+    assert.strictEqual(heights.original.canvas, 400);
+    assert(heights.tall.bar >= heights.original.bar * 1.9 && heights.tall.bar <= heights.original.bar * 2.3, `Высота столбца: ${JSON.stringify(heights)}`);
+    assert.deepStrictEqual(heights.values, configuration.values, 'Увеличение высоты не меняет данные');
     const initialBarWidth = await page.evaluate(() => {
       const c = Chart.getChart(document.querySelector('#expense-chart')); c.update('none');
       return c.getDatasetMeta(c.data.datasets.findIndex((d) => d.label === 'Реклама — тест')).data[0].width;
@@ -382,7 +458,8 @@ with sqlite3.connect(sys.argv[1]) as db:
     assert(await page.locator('#import-apply').isDisabled());
     await page.locator('#import-confirm').check(); await page.locator('#import-apply').click();
     await page.locator('#import-dialog').waitFor({ state: 'hidden' });
-    await page.waitForFunction(() => document.querySelector('[data-quarter-status="1"]').textContent === 'сохранён');
+    await page.waitForFunction(() => document.querySelector('[data-input="retail_revenue"][data-quarter="1"]').value === '120');
+    await assertCleanHeaders();
     assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '120');
     assert.strictEqual(await categoryRow.locator('[data-kind]').inputValue(), 'fixed');
     assert((await page.locator('[data-metric="non_vat_deduction"][data-quarter="1"]').getAttribute('aria-label')).includes('7,25'), 'История вычета сохраняется при экспорте и импорте Excel');
@@ -390,7 +467,7 @@ with sqlite3.connect(sys.argv[1]) as db:
     // Импорт в уже заполненный квартал по умолчанию не заменяет значения.
     await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('240');
     await page.locator('#year-form button[type="submit"]').first().click();
-    await page.waitForFunction(() => document.querySelector('[data-quarter-status="1"]').textContent === 'сохранён' && document.querySelector('[data-input="retail_revenue"][data-quarter="1"]').value === '240');
+    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('#save-status').classList.contains('hidden') && document.querySelector('[data-input="retail_revenue"][data-quarter="1"]').value === '240');
     await importFile(xlsx);
     assert(await page.locator('#import-conflicts').isVisible());
     assert(await page.locator('input[name="import-mode"][value="skip"]').isChecked());
@@ -454,7 +531,7 @@ with sqlite3.connect(sys.argv[1]) as db:
     const saveWithArchive = page.waitForResponse((response) => response.url().endsWith('/api/year') && response.request().method() === 'POST');
     await page.locator('#year-form button[type="submit"]').first().click();
     assert.strictEqual((await saveWithArchive).status(), 200);
-    await page.waitForFunction(() => document.querySelector('[data-quarter-status="1"]').textContent === 'сохранён');
+    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('#save-status').classList.contains('hidden'));
     await page.locator('#toggle-archive').click();
     const archived = page.locator('.archive-item').filter({ hasText: 'Реклама — тест' });
     assert((await archived.innerText()).includes('9,00'));
@@ -483,7 +560,7 @@ with sqlite3.connect(sys.argv[1]) as db:
     // Неопределённый НДС больше не скрывает остальные денежные суммы квартала.
     await page.locator('#year-input').fill('2032'); await page.locator('#year-input').press('Tab');
     await page.waitForFunction(() => document.querySelector('#context-year').textContent.includes('2032'));
-    await page.locator('[data-fill-quarter="2"]').first().click();
+    await fillQuarter(2);
     await page.locator('[data-input="retail_revenue"][data-quarter="2"]').fill('120');
     await page.locator('[data-input="non_vat_sales"][data-quarter="2"]').fill('12');
     await page.locator('[data-input="input_vat"][data-quarter="2"]').fill('10');
@@ -509,7 +586,7 @@ with sqlite3.connect(sys.argv[1]) as db:
     // Отрицательный общий итог не блокирует график сумм и не меняет знак налогов.
     await page.locator('#year-input').fill('2033'); await page.locator('#year-input').press('Tab');
     await page.waitForFunction(() => document.querySelector('#context-year').textContent.includes('2033'));
-    await page.locator('[data-fill-quarter="1"]').first().click();
+    await fillQuarter(1);
     await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('120');
     await page.locator('[data-input="input_vat"][data-quarter="1"]').fill('40');
     await page.locator('[data-input="cost_of_sales"][data-quarter="1"]').fill('50');
@@ -539,26 +616,51 @@ with sqlite3.connect(sys.argv[1]) as db:
     await page.waitForFunction(() => document.querySelector('#context-year').textContent.includes('2034'));
     for (const [index, group] of sheetGroups.entries()) {
       const q = index + 1;
-      await page.locator(`[data-sheet-header="${group}"] [data-fill-quarter="${q}"]`).click();
+      await fillQuarter(q, group);
       await page.locator(`[data-input="retail_revenue"][data-quarter="${q}"]`).fill('120');
     }
     const savedDeleteTest = page.waitForResponse((response) => response.url().endsWith('/api/year') && response.request().method() === 'POST');
     await page.locator('#year-form button[type="submit"]').first().click();
     assert.strictEqual((await savedDeleteTest).status(), 200);
-    await page.waitForFunction(() => !document.querySelector('#application').inert && [...document.querySelectorAll('[data-quarter-status="1"]')].every((el) => el.textContent === 'сохранён'));
+    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('#save-status').classList.contains('hidden'));
+    await assertCleanHeaders();
+    // Удаление не перезаписывает несохранённый черновик и требует подтверждения.
+    await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('121');
+    await openQuarterMenu('financial', 1);
+    await page.locator('#quarter-actions-menu [data-delete-quarter="1"]').click();
+    assert((await page.locator('#toast').innerText()).includes('Сначала сохраните'));
+    assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '121');
+    await page.locator('[data-input="retail_revenue"][data-quarter="1"]').fill('120');
+    const resaved = page.waitForResponse((response) => response.url().endsWith('/api/year') && response.request().method() === 'POST');
+    await page.locator('#year-form button[type="submit"]').first().click();
+    assert.strictEqual((await resaved).status(), 200);
+    await page.waitForFunction(() => !document.querySelector('#application').inert && document.querySelector('#save-status').classList.contains('hidden'));
+    await openQuarterMenu('financial', 1);
+    await page.keyboard.press('ArrowDown');
+    assert(await page.locator('#quarter-actions-menu [data-delete-quarter="1"]').evaluate((el) => el === document.activeElement));
+    acceptDialogs = false;
+    await page.keyboard.press('Enter');
+    acceptDialogs = true;
+    assert.strictEqual(await page.locator('[data-input="retail_revenue"][data-quarter="1"]').inputValue(), '120', 'Отмена подтверждения не удаляет квартал');
     for (const [index, group] of sheetGroups.entries()) {
       const q = index + 1;
       for (const other of sheetGroups) {
         const toggle = page.locator(`[data-panel-toggle="${other}"]`), shouldOpen = other === group;
         if ((await toggle.getAttribute('aria-expanded') === 'true') !== shouldOpen) await toggle.click();
       }
-      assert(await page.locator(`[data-sheet-header="${group}"] [data-delete-quarter="${q}"]`).isEnabled());
-      await page.locator(`[data-sheet-header="${group}"] [data-delete-quarter="${q}"]`).click();
-      await page.waitForFunction((quarter) => !document.querySelector('#application').inert && [...document.querySelectorAll(`[data-quarter-status="${quarter}"]`)].every((el) => el.textContent === 'нет данных'), q);
-      for (const button of await page.locator(`[data-delete-quarter="${q}"]`).all()) assert(await button.isDisabled());
+      await openQuarterMenu(group, q);
+      assert(await page.locator(`#quarter-actions-menu [data-delete-quarter="${q}"]`).isEnabled());
+      const deleted = page.waitForResponse((response) => response.url().endsWith('/api/period') && response.request().method() === 'DELETE');
+      await page.locator(`#quarter-actions-menu [data-delete-quarter="${q}"]`).click();
+      assert.strictEqual((await deleted).status(), 200);
+      await page.waitForFunction((quarter) => document.querySelector(`[data-input="retail_revenue"][data-quarter="${quarter}"]`).value === '', q);
+      await openQuarterMenu(group, q);
+      assert(await page.locator(`#quarter-actions-menu [data-delete-quarter="${q}"]`).isDisabled());
+      await page.keyboard.press('Escape');
+      await assertCleanHeaders();
     }
     assert.deepStrictEqual(errors, [], `Ошибки браузера: ${errors.join('; ')}`);
-    console.log('UI smoke: шапка каждого раздела, столбчатые суммы в рублях, сохранение истории, ширина, меню, архив/удаление, XLSX и конкуренция — OK.');
+    console.log('UI smoke: чистые шапки, меню кварталов, высокий график, сохранение истории, ширина, архив/удаление, XLSX и конкуренция — OK.');
   } finally {
     if (browser) await browser.close();
     if (child.exitCode === null) {
